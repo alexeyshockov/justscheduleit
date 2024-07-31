@@ -1,0 +1,38 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          # Full git history is needed to get a proper list of changed files within `super-linter`
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          cache: pip
+      - name: Install MyPy types
+        run: |
+          python3 -m pip install --upgrade pip wheel
+          python3 -m pip install -r requirements.txt --disable-pip-version-check
+      - uses: github/super-linter/slim@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only new files
+          VALIDATE_ALL_CODEBASE: false
+          VALIDATE_EDITORCONFIG: true
+          VALIDATE_JSON: true
+          VALIDATE_MARKDOWN: true
+          VALIDATE_YAML: true
+#          VALIDATE_PYTHON_PYLINT: true
+#          PYTHON_PYLINT_CONFIG_FILE: pyproject.toml
+          VALIDATE_PYTHON_RUFF: true
+          PYTHON_RUFF_CONFIG_FILE: pyproject.toml
+#          VALIDATE_PYTHON_MYPY: true
+#          PYTHON_MYPY_CONFIG_FILE: pyproject.toml
+          LINTER_RULES_PATH: .
