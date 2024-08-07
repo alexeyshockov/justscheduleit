@@ -1,6 +1,6 @@
 # JustScheduleIt
 
-Simple in-process task scheduler for Python.
+Simple in-process task scheduler for Python apps.
 
 Use it if:
 - you need to schedule a background tasks in the same process, like to update a shared (Pandas) dataframe every hour from S3
@@ -26,6 +26,7 @@ schedule), or just abandoned.
 - [schedule](https://github.com/dbader/schedule) — does not support async tasks
 - https://github.com/aio-libs/aiojobs
 - https://pypi.org/project/aio-recurring/
+- https://github.com/quantmind/aio-fluid/tree/main/fluid/scheduler#tasks
 
 And some (probably) abandoned ones:
 

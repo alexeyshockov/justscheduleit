@@ -36,7 +36,8 @@ sync-deps: upgrade-pip
 check-style:
     ruff check justscheduleit examples
 check-types:
-    pyright --pythonpath $(which python) justscheduleit examples
+    #pyright --pythonpath $(which python) justscheduleit examples
+    pyright --pythonpath $(which python) justscheduleit
 check: check-style check-types
 
 

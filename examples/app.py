@@ -1,7 +1,10 @@
+#!/usr/bin/env python
+
 import logging
 import random
 from datetime import timedelta
 
+import justscheduleit
 from justscheduleit import Scheduler, after, every, recurrent
 
 logging.basicConfig()
@@ -38,4 +41,4 @@ async def task3():
 
 
 if __name__ == "__main__":
-    scheduler.run()
+    justscheduleit.run(scheduler)

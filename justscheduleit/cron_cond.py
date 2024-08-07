@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import dataclasses as dc
-import logging
 from typing import AsyncIterator
 
 from croniter import croniter
 
 from justscheduleit._utils import DC_CONFIG, random_jitter, sleep
-from justscheduleit.scheduler import _SchedulerExecution  # noqa
+from justscheduleit.cond import logger  # noqa
+from justscheduleit.scheduler import SchedulerLifetime
 
 __all__ = ["cron"]
-
-logger = logging.getLogger("justscheduleit.cond")
 
 
 # noinspection PyPep8Naming
@@ -24,7 +22,7 @@ class cron:
     schedule: str | croniter
     jitter: tuple[int, int] | None = (1, 10)
 
-    async def __call__(self, _, __: _SchedulerExecution) -> AsyncIterator[None]:
+    async def __call__(self, _: SchedulerLifetime) -> AsyncIterator[None]:
         schedule = self.schedule if isinstance(self.schedule, croniter) else croniter(self.schedule)
         schedule_expr = " ".join(schedule.expressions)
 

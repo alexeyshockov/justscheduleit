@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
