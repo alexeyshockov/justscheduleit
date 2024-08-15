@@ -19,6 +19,8 @@ coverage==7.6.1
     #   pytest-cov
 croniter==3.0.3
     # via justscheduleit (pyproject.toml)
+deprecated==1.2.14
+    # via opentelemetry-api
 exceptiongroup==1.2.2
     # via
     #   anyio
@@ -31,8 +33,12 @@ h11==0.14.0
     # via uvicorn
 idna==3.7
     # via anyio
+importlib-metadata==8.0.0
+    # via opentelemetry-api
 iniconfig==2.0.0
     # via pytest
+opentelemetry-api==1.26.0
+    # via justscheduleit (pyproject.toml)
 packaging==24.1
     # via pytest
 pluggy==1.5.0
@@ -86,3 +92,7 @@ uvicorn==0.30.5
     # via justscheduleit (pyproject.toml)
 uvloop==0.19.0
     # via justscheduleit (pyproject.toml)
+wrapt==1.16.0
+    # via deprecated
+zipp==3.19.2
+    # via importlib-metadata

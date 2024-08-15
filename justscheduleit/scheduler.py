@@ -2,57 +2,99 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Mapping, AsyncGenerator, AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
+from functools import partial
 from typing import (
+    TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
     Generic,
+    Protocol,
     TypeVar,
     Union,
-    final, Optional, cast, )
+    cast,
+    final,
+)
 
 import anyio
-from anyio import CancelScope, create_memory_object_stream, to_thread, \
-    create_task_group, TASK_STATUS_IGNORED, get_cancelled_exc_class
-from anyio.abc import TaskStatus
+from anyio import (
+    CancelScope,
+    create_memory_object_stream,
+    create_task_group,
+    get_cancelled_exc_class,
+    to_thread,
+)
 from anyio.from_thread import BlockingPortal
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from typing_extensions import ParamSpec
+from typing_extensions import ParamSpec, overload
 
-from justscheduleit import hosting
-from justscheduleit._utils import choose_anyio_backend, task_full_name, EventView, observe_event
+from justscheduleit._utils import NULL_CM, EventView, choose_anyio_backend, observe_event, task_full_name
+from justscheduleit.hosting import Host, HostLifetime, ServiceLifetime
 
-__all__ = ["Scheduler", "SchedulerLifetime", "ScheduledTask", "TaskExecutionFlow", "arun", "run"]
-
-from justscheduleit.hosting import ServiceLifetime, Host, HostLifetime
+if TYPE_CHECKING:  # Optional dependencies
+    # noinspection PyPackageRequirements
+    from opentelemetry.trace import Tracer, TracerProvider
 
 T = TypeVar("T")
 TriggerEventT = TypeVar("TriggerEventT")
+TaskT = Union[Callable[..., Awaitable[T]], Callable[..., T]]
 P = ParamSpec("P")
+
+__all__ = [
+    "Scheduler",
+    "SchedulerLifetime",
+    "ScheduledTask",
+    "TaskExecutionFlow",
+    "TaskT",
+    "Trigger",
+    "TriggerFactory",
+    "arun",
+    "run",
+    "aserve",
+    "serve",
+]
 
 logger = logging.getLogger(__name__)
 
 
-def _wrap_to_async(func: Callable[P, T] | Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
-    def call_in_thread(*args, **kwargs) -> Awaitable[T]:
-        return to_thread.run_sync(func, *args, **kwargs)  # type: ignore
+class TaskExecutionFlow(Protocol[T, TriggerEventT]):
+    @property
+    def task(self) -> ScheduledTask[T, TriggerEventT]: ...
 
-    return func if inspect.iscoroutinefunction(func) else call_in_thread  # type: ignore
+    def subscribe(self) -> MemoryObjectReceiveStream[T]: ...
 
 
-@final
-class TaskExecutionFlow(Generic[T]):
-    """
-    Task execution context. Once started, cannot be started again.
-    """
-
-    task: ScheduledTask[T, Any]  # TODO TriggerEventT
-    scheduler_lifetime: SchedulerLifetime
-
-    _results: MemoryObjectSendStream[T]
+class _TaskExecutionFlow(Generic[T, TriggerEventT]):
+    task: ScheduledTask[T, TriggerEventT]
+    results: MemoryObjectSendStream[T]
     _results_reader: MemoryObjectReceiveStream[T]
-    _observed: bool
+
+    __slots__ = ("task", "results", "_results_reader")
+
+    def __init__(self, task: ScheduledTask[T, Any]):
+        self.task = task
+        self.results, self._results_reader = create_memory_object_stream[T]()
+
+    @property
+    def is_observed(self) -> bool:
+        return self._results_reader.statistics().open_receive_streams > 1
+
+    def subscribe(self) -> MemoryObjectReceiveStream[T]:
+        return self._results_reader.clone()
+
+
+class _TaskExecution(Generic[T, TriggerEventT]):
+    task: ScheduledTask[T, TriggerEventT]
+    exec_flow: _TaskExecutionFlow[T, TriggerEventT]
+    trigger: AsyncGenerator[TriggerEventT, T]
+
+    _async_target: Callable[..., Awaitable[T]]
+    """
+    The target function, maybe wrapped (if the task's target is a sync function).
+    """
+
     _scope: CancelScope | None
     """
     Graceful shutdown scope.
@@ -62,58 +104,41 @@ class TaskExecutionFlow(Generic[T]):
        optimize the shutdown process internally).
     """
 
-    __slots__ = ("task", "scheduler_lifetime", "_results", "_results_reader", "_observed", "_scope")
+    _tracer: Tracer | None
 
-    def __init__(self, task: ScheduledTask[T, Any], scheduler_lifetime: SchedulerLifetime):
+    __slots__ = ("task", "exec_flow", "trigger", "_async_target", "_scope", "_tracer")
+
+    def __init__(self, exec_flow: _TaskExecutionFlow[T, TriggerEventT], scheduler_lifetime: SchedulerLifetime):
+        task = exec_flow.task
         self.task = task
-        self.scheduler_lifetime = scheduler_lifetime
+        self.exec_flow = exec_flow
+        self.trigger = task.trigger(scheduler_lifetime)
 
-        self._results, self._results_reader = create_memory_object_stream[T]()
-        self._observed = False
+        t = task.target
+        self._async_target = cast(
+            Callable[..., Awaitable[T]], t if inspect.iscoroutinefunction(t) else partial(to_thread.run_sync, t)
+        )
+
         self._scope = None
+        self._tracer = scheduler_lifetime.scheduler._tracer  # noqa
 
-    def subscribe(self) -> MemoryObjectReceiveStream[T]:
-        # Make sure that there is at least one subscriber, otherwise we will just spam the memory buffer
-        self._observed = True
-        return self._results_reader.clone()
+    @property
+    def has_started(self) -> bool:
+        return self._scope is not None
 
-    def _check_started(self):
-        if self._scope is not None:
+    async def __call__(self, service_lifetime: ServiceLifetime) -> None:
+        if self.has_started:
             raise RuntimeError("Task already started")
 
-    async def serve(self, *, task_status: TaskStatus[CancelScope] = TASK_STATUS_IGNORED) -> None:
-        self._check_started()
-
-        shutdown_scope = self._scope = CancelScope()
-        trigger = self.task.trigger(self.scheduler_lifetime)
-
-        task_status.started(shutdown_scope)
+        self._scope = service_lifetime.graceful_shutdown_scope = shutdown_scope = CancelScope()
+        service_lifetime.set_started()
 
         # Iterate manually, as we want to use the shutdown scope only for the waiting part
-        if inspect.isasyncgen(trigger):
-            await self._serve_with_feedback(trigger)
-        else:  # AsyncIterable
-            await self._serve(trigger)
 
-    async def _serve(self, trigger: AsyncIterable[Any]) -> None:
-        event_stream = trigger.__aiter__()
-        shutdown_scope = cast(CancelScope, self._scope)
-        async with self._results:
-            try:
-                while True:
-                    with shutdown_scope:
-                        event = await event_stream.__anext__()
-                    if shutdown_scope.cancel_called:
-                        break
-                    await self._execute(event)
-            except StopAsyncIteration:  # As per https://docs.python.org/3/reference/expressions.html#agen.__anext__
-                pass  # Event stream has been exhausted
-
-    async def _serve_with_feedback(self, trigger: AsyncGenerator[Any, T]) -> None:
+        trigger = self.trigger
         # Initialize the event stream, as per the (async) generator protocol
         move_next = trigger.asend(None)  # type: ignore
-        shutdown_scope = cast(CancelScope, self._scope)
-        async with self._results:
+        async with self.exec_flow.results:
             try:
                 while True:
                     with shutdown_scope:
@@ -121,7 +146,7 @@ class TaskExecutionFlow(Generic[T]):
                     if shutdown_scope.cancel_called:
                         break
                     try:
-                        result = await self._execute(event)
+                        result = await self._execute_task(event)
                         move_next = trigger.asend(result)
                     except get_cancelled_exc_class():  # noqa
                         raise  # Propagate cancellation
@@ -132,54 +157,52 @@ class TaskExecutionFlow(Generic[T]):
             finally:
                 await trigger.aclose()
 
-    async def _execute(self, event: Any) -> T:
-        result = await self.task(event)
-        if self._observed:
-            await self._results.send(result)
+    async def _execute_task(self, event: Any) -> T:
+        root_span = NULL_CM
+        if self._tracer:
+            # TODO Inside the thread, for sync tasks?..
+            root_span = self._tracer.start_as_current_span(self.task.name)  # type: ignore
+        with root_span:
+            if self.task.event_aware:
+                result = await self._async_target(event)
+            else:
+                result = await self._async_target()
+        if self.exec_flow.is_observed:
+            await self.exec_flow.results.send(result)
         return result
 
 
 @final
 class ScheduledTask(Generic[T, TriggerEventT]):
     name: str
-    trigger: TriggerFactory
-    target: Callable[..., Awaitable[T]] | Callable[..., T]
-    scheduler: Scheduler
+    trigger: TriggerFactory[TriggerEventT, T]
+    target: TaskT[T]
     event_aware: bool
-
-    _async_target: Callable[..., Awaitable[T]]
     """
-    The target function, maybe wrapped to an async one.
+    Whether the target function accepts an event parameter.
+
+    By default, detected based on the target's signature (number of parameters). Can be overridden (in case the
+    autodetect value is incorrect).
     """
 
-    __slots__ = ("name", "trigger", "target", "scheduler", "event_aware", "_async_target")
+    __slots__ = ("name", "trigger", "target", "event_aware")
 
     def __repr__(self):
         return f"<{self.__class__.__name__}({self.name!r}) with {self.trigger!r} trigger>"
 
-    def __init__(self,
-                 scheduler: Scheduler,
-                 trigger: TriggerFactory,
-                 target: Callable[..., Awaitable[T]] | Callable[..., T],
-                 *,
-                 name: str | None = None):
+    def __init__(
+        self,
+        trigger: TriggerFactory,
+        target: TaskT[T],
+        *,
+        name: str | None = None,
+    ):
         self.name = name if name else task_full_name(target)
         self.trigger = trigger
         self.target = target
-        self.scheduler = scheduler
         # Choose the right callable based on the target's signature (parameters)
         func_signature = inspect.signature(target)
         self.event_aware = len(func_signature.parameters) > 0
-
-        self._async_target = _wrap_to_async(target)
-
-    async def __call__(self, event: Any) -> T:
-        """
-        Execute the task function, on the given trigger event.
-        """
-        if self.event_aware:
-            return await self._async_target(event)
-        return await self._async_target()
 
 
 @final
@@ -188,19 +211,17 @@ class SchedulerLifetime:
     Scheduler execution manager, for _outside_ control of the scheduler.
     """
 
-    _host_lifetime: HostLifetime
-    _service_lifetime: ServiceLifetime
-
     scheduler: Scheduler
     tasks: Mapping[ScheduledTask, TaskExecutionFlow]
 
-    __slots__ = ("scheduler", "_host_lifetime", "_service_lifetime", "tasks")
+    _service_lifetime: ServiceLifetime
 
-    def __init__(self, scheduler: Scheduler, service_lifetime: ServiceLifetime):
-        self._host_lifetime = service_lifetime.host_lifetime
-        self._service_lifetime = service_lifetime
+    __slots__ = ("scheduler", "tasks", "_service_lifetime")
+
+    def __init__(self, scheduler, exec_flows, service_lifetime):
         self.scheduler = scheduler
-        self.tasks = {task: TaskExecutionFlow(task, self) for task in scheduler.tasks}
+        self.tasks = {exec_flow.task: exec_flow for exec_flow in exec_flows}
+        self._service_lifetime = service_lifetime
 
     def __repr__(self):
         return f"<{self.__class__.__name__} for {self.scheduler!r}>"
@@ -219,9 +240,15 @@ class SchedulerLifetime:
 
     @property
     def host_portal(self) -> BlockingPortal:
-        return self._host_lifetime.portal
+        return self._service_lifetime.host_lifetime.portal
 
-    def find_exec_for(self, task: Callable | ScheduledTask) -> TaskExecutionFlow | None:
+    @overload
+    def find_exec_for(self, task: TaskT[T]) -> TaskExecutionFlow[T, Any] | None: ...
+
+    @overload
+    def find_exec_for(self, task: ScheduledTask[T, TriggerEventT]) -> TaskExecutionFlow[T, TriggerEventT] | None: ...
+
+    def find_exec_for(self, task: TaskT[T] | ScheduledTask[T, Any]) -> TaskExecutionFlow[T, Any] | None:
         if isinstance(task, ScheduledTask):
             return self.tasks.get(task)
 
@@ -235,35 +262,8 @@ class SchedulerLifetime:
         self._service_lifetime.shutdown()
 
 
-Trigger = Union[
-    AsyncGenerator[TriggerEventT, T],  # Duplex, two-way communication
-    AsyncIterable[TriggerEventT],  # Simplex, one-way communication
-]
-
-DuplexTriggerFactory = Callable[[SchedulerLifetime], AsyncGenerator[TriggerEventT, T]]
-SimplexTriggerFactory = Callable[[SchedulerLifetime], AsyncIterable[TriggerEventT]]
-# TriggerFactory = Union[DuplexTriggerFactory, SimplexTriggerFactory]
-TriggerFactory = Union[
-    Callable[[SchedulerLifetime], AsyncGenerator[TriggerEventT, T]],
-    Callable[[SchedulerLifetime], AsyncIterable[TriggerEventT]],
-]
-
-
-# async def no_task_error_handler(_, __):
-#     return False  # Exception is not suppressed, to stop the execution flow
-#
-#
-# async def logging_task_error_handler(task: ScheduledTask, exc: Exception) -> bool | None:
-#     """
-#     Default task error handler, which logs the exception and signals to continue the execution flow.
-#
-#     In your custom handlers, if you want to stop the execution, just return `False`. That means that the exception is
-#     not suppressed. See :func:`no_task_error_handler` for an example. The same idea as with
-#     :meth:`AbstractAsyncContextManager.__aexit__`.
-#     """
-#     logger.exception("Task %s execution failed", task.name, exc_info=exc)
-#     return True
-
+Trigger = AsyncGenerator[TriggerEventT, T]
+TriggerFactory = Callable[[SchedulerLifetime], AsyncGenerator[TriggerEventT, T]]
 
 
 @final
@@ -272,13 +272,39 @@ class Scheduler:
     tasks: list[ScheduledTask]
 
     _lifetime: SchedulerLifetime | None
+    _tracer: Tracer | None
 
-    __slots__ = ("name", "tasks", "_tasks_host", "_lifetime")
+    __slots__ = ("name", "tasks", "_lifetime", "_tracer")
 
     def __init__(self, name: str | None = None):
         self.name = name or "default_scheduler"
         self.tasks = []
         self._lifetime = None
+        try:  # By default, try to enable OpenTelemetry instrumentation
+            self.instrument()
+        except RuntimeError:
+            self._tracer = None
+
+    def instrument(self, tracer_provider: TracerProvider | None = None):
+        if self._is_running:
+            raise RuntimeError("Cannot change instrumentation setting on a running scheduler")
+        try:
+            # noinspection PyPackageRequirements
+            from opentelemetry.trace import get_tracer_provider
+
+            tracer_provider = tracer_provider or get_tracer_provider()
+            self._tracer = tracer_provider.get_tracer(__name__)  # TODO Version
+        except ImportError:
+            raise RuntimeError("OpenTelemetry package is not available") from None
+
+    def uninstrument(self):
+        if self._is_running:
+            raise RuntimeError("Cannot change instrumentation setting on a running scheduler")
+        self._tracer = None
+
+    @property
+    def _is_running(self) -> bool:
+        return self._lifetime is not None
 
     @property
     def lifetime(self) -> SchedulerLifetime:
@@ -289,12 +315,14 @@ class Scheduler:
     def __repr__(self):
         return f"<{self.__class__.__name__} with {len(self.tasks)} tasks>"
 
-    def add_task(self,
-                 trigger: TriggerFactory[TriggerEventT, T],
-                 func: Callable[..., Awaitable[T]] | Callable[..., T],
-                 *,
-                 name: str | None = None) -> ScheduledTask[T, TriggerEventT]:
-        task = ScheduledTask(self, trigger, func, name=name)
+    def add_task(
+        self,
+        trigger: TriggerFactory[TriggerEventT, T],
+        func: TaskT[T],
+        *,
+        name: str | None = None,
+    ) -> ScheduledTask[T, TriggerEventT]:
+        task = ScheduledTask(trigger, func, name=name)
         self.tasks.append(task)
         return task
 
@@ -302,22 +330,25 @@ class Scheduler:
         """
         Decorator to register a new task.
         """
+
         def decorator(func: Callable[P, T]) -> Callable[P, T]:
             self.add_task(trigger, func, name=name)
             return func
 
         return decorator
 
-    async def serve(self, service_lifetime: ServiceLifetime) -> None:
+    async def execute(self, service_lifetime: ServiceLifetime) -> None:
         """
         Run as a hosted service.
         """
         logger.debug("Starting tasks host...")
-        self._lifetime = scheduler_lifetime = SchedulerLifetime(self, service_lifetime)
+        tasks = [_TaskExecutionFlow(task) for task in self.tasks]
+        self._lifetime = scheduler_lifetime = SchedulerLifetime(self, tasks, service_lifetime)
         try:
             tasks_host = Host(f"{self.name}_tasks_host")
-            for task, exec_flow in scheduler_lifetime.tasks.items():
-                tasks_host.add_service(exec_flow.serve, name=task.name)
+            for exec_flow in tasks:
+                task_exec = _TaskExecution(exec_flow, scheduler_lifetime)
+                tasks_host.services[exec_flow.task.name] = task_exec
             tasks_host_lifetime: HostLifetime
             async with tasks_host.aserve_in(service_lifetime.host_portal) as tasks_host_lifetime:
                 async with create_task_group() as tg:
@@ -331,10 +362,28 @@ class Scheduler:
             self._lifetime = None
 
 
-async def arun(scheduler: Scheduler):
+def _host(scheduler: Scheduler):
     host = Host(f"{scheduler.name}_host")
-    host.services["scheduler"] = scheduler.serve
-    await hosting.arun(host)
+    host.services["scheduler"] = scheduler.execute
+    return host
+
+
+@asynccontextmanager
+async def aserve(scheduler: Scheduler) -> AsyncIterator[HostLifetime]:
+    async with _host(scheduler).aserve() as host_lifetime:
+        yield host_lifetime
+
+
+@contextmanager
+def serve(scheduler: Scheduler) -> Iterator[HostLifetime]:
+    with _host(scheduler).serve() as host_lifetime:
+        yield host_lifetime
+
+
+async def arun(scheduler: Scheduler):
+    from justscheduleit import hosting
+
+    await hosting.arun(_host(scheduler))
 
 
 def run(scheduler: Scheduler):

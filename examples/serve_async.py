@@ -6,8 +6,10 @@ from examples.app import scheduler
 
 
 async def main():
+    from justscheduleit.scheduler import aserve
+
     # Scheduler in the same thread, same event loop
-    async with scheduler.aserve() as scheduler_exec:
+    async with aserve(scheduler):
         for _ in range(10):
             await anyio.sleep(1)
             print("Main thread is running...")

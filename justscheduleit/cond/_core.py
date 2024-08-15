@@ -5,19 +5,17 @@ import inspect
 import logging
 from collections.abc import AsyncGenerator
 from datetime import timedelta
-from typing import Any, Awaitable, Callable, Generic, TypeVar, final
+from typing import Any, Generic, TypeVar, final
 
-from anyio import EndOfStream, ClosedResourceError
+from anyio import ClosedResourceError, EndOfStream
 
-from justscheduleit._utils import DC_CONFIG, random_jitter, sleep
-from justscheduleit.scheduler import (SchedulerLifetime, ScheduledTask, TaskExecutionFlow, TriggerFactory)
-
-__all__ = ["every", "recurrent", "after"]
+from justscheduleit._utils import random_jitter, sleep
+from justscheduleit.scheduler import ScheduledTask, SchedulerLifetime, TaskExecutionFlow, TaskT, TriggerFactory
 
 TriggerEventT = TypeVar("TriggerEventT")
 T = TypeVar("T")  # Task result type
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("justscheduleit.cond")
 
 
 def skip_first(n: int, trigger: TriggerFactory[TriggerEventT, T]) -> TriggerFactory[TriggerEventT, T]:
@@ -82,21 +80,17 @@ def take_first(n: int, trigger: TriggerFactory[TriggerEventT, T]) -> TriggerFact
 
 # noinspection PyPep8Naming
 @final
-@dc.dataclass(frozen=True, **DC_CONFIG)  # TODO Check repr()
+@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
 class every:
     """
     Triggers every `period`, with a random `jitter`.
     """
 
     period: timedelta
-    jitter: tuple[int, int] | None = dc.field(
-        default=(1, 10),
-        # kw_only=True,  # Enable when Python 3.10 is the minimum version
-    )
-    stop_on_error: bool = dc.field(
-        default=False,
-        # kw_only=True,  # Enable when Python 3.10 is the minimum version
-    )
+    jitter: tuple[int, int] | None = dc.field(default=(1, 10))  # Enable kw_only when Python 3.10+
+    stop_on_error: bool = dc.field(default=False)  # Enable kw_only when Python 3.10+
+
+    # TODO Check repr()
 
     async def __call__(self, _) -> AsyncGenerator[None, Any]:
         iter_n = 0
@@ -125,21 +119,17 @@ class every:
 
 # noinspection PyPep8Naming
 @final
-@dc.dataclass(frozen=True, **DC_CONFIG)  # TODO Check repr()
+@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
 class recurrent:
     """
     Triggers every `default_period` (unless overwritten), with a random `jitter`.
     """
 
-    default_period: timedelta = timedelta(minutes=1)
-    jitter: tuple[int, int] | None = dc.field(
-        default=(1, 10),
-        # kw_only=True,  # Enable when Python 3.10 is the minimum version
-    )
-    stop_on_error: bool = dc.field(
-        default=False,
-        # kw_only=True,  # Enable when Python 3.10 is the minimum version
-    )
+    default_interval: timedelta = timedelta(minutes=1)
+    jitter: tuple[int, int] | None = dc.field(default=(1, 10))  # Enable kw_only when Python 3.10+
+    stop_on_error: bool = dc.field(default=False)  # Enable kw_only when Python 3.10+
+
+    # TODO Check repr()
 
     async def __call__(self, _) -> AsyncGenerator[None, timedelta]:
         iter_n = 0
@@ -159,28 +149,27 @@ class recurrent:
             try:
                 iter_delay = yield
                 if iter_delay is None:
-                    iter_delay = self.default_period
+                    iter_delay = self.default_interval
                 elif not isinstance(iter_delay, timedelta):
                     logger.warning("Invalid delta override (expected %s, got %s)", timedelta, type(iter_delay))
-                    iter_delay = self.default_period
+                    iter_delay = self.default_interval
             except Exception:  # noqa
                 logger.warning("Error during task execution, using default period for the next iteration")
-                iter_delay = self.default_period
+                iter_delay = self.default_interval
 
 
 # noinspection PyPep8Naming
 @final
-@dc.dataclass(frozen=True, **DC_CONFIG)  # TODO Check repr()
+@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
 class after(Generic[T]):
     """
     Triggers every time `task` is completed, with a random `jitter`.
     """
 
-    task: Callable[..., Awaitable[T]] | Callable[..., T] | ScheduledTask[T, Any]
-    jitter: tuple[int, int] | None = dc.field(
-        default=(1, 10),
-        # kw_only=True,  # Enable when Python 3.10 is the minimum version
-    )
+    task: TaskT[T] | ScheduledTask[T, Any]
+    jitter: tuple[int, int] | None = dc.field(default=(1, 10))  # Enable kw_only when Python 3.10+
+
+    # TODO Check repr()
 
     def __call__(self, scheduler_lifetime: SchedulerLifetime) -> AsyncGenerator[T, Any]:
         task_exec_flow = scheduler_lifetime.find_exec_for(self.task)
@@ -189,7 +178,7 @@ class after(Generic[T]):
 
         return self._run(task_exec_flow)
 
-    async def _run(self, task_exec_flow: TaskExecutionFlow[T]):
+    async def _run(self, task_exec_flow: TaskExecutionFlow[T, Any]):
         task_executions = task_exec_flow.subscribe()
         task = task_exec_flow.task
 

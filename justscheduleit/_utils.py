@@ -3,22 +3,20 @@ from __future__ import annotations
 import random
 import signal
 import sys
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
-from typing import Any, Callable, Iterable, TypedDict, TypeVar, Protocol
+from typing import Any, Callable, Protocol, TypedDict, TypeVar
 
 import anyio
-from anyio import create_task_group, Event
+from anyio import Event
 from anyio.abc import TaskGroup
 from typing_extensions import NotRequired
 
 T = TypeVar("T")
 
-DC_CONFIG: dict[str, bool] = {}
-if sys.version_info >= (3, 10):
-    DC_CONFIG["slots"] = True
-
 TD_ZERO = timedelta(0)
+
+NULL_CM: AbstractContextManager[None] = nullcontext()
 
 HANDLED_SIGNALS = (
     signal.SIGINT,  # Unix signal 2. Sent by Ctrl+C.
@@ -49,10 +47,6 @@ async def sleep(period: timedelta | int | float | None) -> None:
         await anyio.sleep(period)
 
 
-def first(collection: Iterable[T]) -> T:
-    return next(iter(collection))
-
-
 class AsyncBackendConfig(TypedDict):
     backend: str
     backend_options: NotRequired[dict[str, Any]]
@@ -72,11 +66,9 @@ class EventView(Protocol):
     Read-only view on an async event.
     """
 
-    async def wait(self) -> None:
-        ...
+    async def wait(self) -> None: ...
 
-    def is_set(self) -> bool:
-        ...
+    def is_set(self) -> bool: ...
 
 
 def observe_event(tg: TaskGroup, source: Event | EventView, target: Callable) -> None:
@@ -85,25 +77,3 @@ def observe_event(tg: TaskGroup, source: Event | EventView, target: Callable) ->
         target()
 
     tg.start_soon(wait_and_set)  # type: ignore
-
-
-# class CancellableTaskGroup(AbstractAsyncContextManager[TaskGroup]):
-#     _event: anyio.Event
-#     _task_group: TaskGroup
-#
-#     def __init__(self, event: anyio.Event):
-#         self._event = event
-#         self._task_group = create_task_group()
-#
-#     async def _monitor(self) -> None:
-#         await self._event.wait()
-#         self._task_group.cancel_scope.cancel()
-#
-#     async def __aenter__(self) -> TaskGroup:
-#         await self._task_group.__aenter__()
-#         # noinspection PyTypeChecker
-#         self._task_group.start_soon(self._monitor)
-#         return self._task_group
-#
-#     async def __aexit__(self, __exc_type, __exc_value, __traceback) -> bool | None:
-#         return await self._task_group.__aexit__(__exc_type, __exc_value, __traceback)

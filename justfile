@@ -41,6 +41,8 @@ check-types:
 check: check-style check-types
 
 
+
+alias fix-style := format
 format:
     ruff check --fix justscheduleit examples
     ruff format justscheduleit examples
