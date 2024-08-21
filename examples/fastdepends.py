@@ -19,7 +19,7 @@ def roll_dice():
     return random.randint(1, 6)
 
 
-@scheduler.task(every(timedelta(seconds=3), jitter=None))
+@scheduler.task(every(timedelta(seconds=3), delay=None))
 @inject
 def print_task(
     n1: int = Depends(roll_dice, use_cache=False),

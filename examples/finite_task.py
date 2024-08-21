@@ -15,7 +15,7 @@ logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 scheduler = Scheduler()
 
 
-@scheduler.task(take_first(3, every(timedelta(seconds=3), jitter=(0, 3))))
+@scheduler.task(take_first(3, every(timedelta(seconds=3), delay=(0, 3))))
 async def task1():
     """
     A simple repeating task that returns a random number.

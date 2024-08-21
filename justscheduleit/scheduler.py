@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses as dc
 import inspect
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping
@@ -28,7 +29,7 @@ from anyio import (
 )
 from anyio.from_thread import BlockingPortal
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from typing_extensions import ParamSpec, overload
+from typing_extensions import ParamSpec, Self, overload
 
 from justscheduleit._utils import NULL_CM, EventView, choose_anyio_backend, observe_event, task_full_name
 from justscheduleit.hosting import Host, HostLifetime, ServiceLifetime
@@ -173,6 +174,7 @@ class _TaskExecution(Generic[T, TriggerEventT]):
 
 
 @final
+@dc.dataclass(frozen=True)
 class ScheduledTask(Generic[T, TriggerEventT]):
     name: str
     trigger: TriggerFactory[TriggerEventT, T]
@@ -185,24 +187,9 @@ class ScheduledTask(Generic[T, TriggerEventT]):
     autodetect value is incorrect).
     """
 
-    __slots__ = ("name", "trigger", "target", "event_aware")
-
-    def __repr__(self):
-        return f"<{self.__class__.__name__}({self.name!r}) with {self.trigger!r} trigger>"
-
-    def __init__(
-        self,
-        trigger: TriggerFactory,
-        target: TaskT[T],
-        *,
-        name: str | None = None,
-    ):
-        self.name = name if name else task_full_name(target)
-        self.trigger = trigger
-        self.target = target
-        # Choose the right callable based on the target's signature (parameters)
-        func_signature = inspect.signature(target)
-        self.event_aware = len(func_signature.parameters) > 0
+    @classmethod
+    def create(cls, trigger: TriggerFactory, target: TaskT[T], *, name: str | None = None) -> Self:
+        return cls(name or task_full_name(target), trigger, target, len(inspect.signature(target).parameters) > 0)
 
 
 @final
@@ -322,7 +309,7 @@ class Scheduler:
         *,
         name: str | None = None,
     ) -> ScheduledTask[T, TriggerEventT]:
-        task = ScheduledTask(trigger, func, name=name)
+        task = ScheduledTask.create(trigger, func, name=name)
         self.tasks.append(task)
         return task
 
@@ -337,7 +324,7 @@ class Scheduler:
 
         return decorator
 
-    async def execute(self, service_lifetime: ServiceLifetime) -> None:
+    async def __call__(self, service_lifetime: ServiceLifetime) -> None:
         """
         Run as a hosted service.
         """
@@ -364,7 +351,7 @@ class Scheduler:
 
 def _host(scheduler: Scheduler):
     host = Host(f"{scheduler.name}_host")
-    host.services["scheduler"] = scheduler.execute
+    host.services["scheduler"] = scheduler
     return host
 
 

@@ -5,17 +5,27 @@ import inspect
 import logging
 from collections.abc import AsyncGenerator
 from datetime import timedelta
-from typing import Any, Generic, TypeVar, final
+from typing import Any, Callable, Generic, TypeVar
 
 from anyio import ClosedResourceError, EndOfStream
 
-from justscheduleit._utils import random_jitter, sleep
+from justscheduleit._utils import (
+    DelayFactory,
+    RandomDelay,
+    ensure_delay_factory,
+    ensure_td,
+    sleep,
+    task_full_name,
+    td_str,
+)
 from justscheduleit.scheduler import ScheduledTask, SchedulerLifetime, TaskExecutionFlow, TaskT, TriggerFactory
 
 TriggerEventT = TypeVar("TriggerEventT")
 T = TypeVar("T")  # Task result type
 
 logger = logging.getLogger("justscheduleit.cond")
+
+DEFAULT_JITTER = RandomDelay((1, 10))
 
 
 def skip_first(n: int, trigger: TriggerFactory[TriggerEventT, T]) -> TriggerFactory[TriggerEventT, T]:
@@ -78,98 +88,125 @@ def take_first(n: int, trigger: TriggerFactory[TriggerEventT, T]) -> TriggerFact
     return _take
 
 
-# noinspection PyPep8Naming
-@final
 @dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
-class every:
+class Every:
     """
-    Triggers every `period`, with a random `jitter`.
+    Triggers every `period`, with an (optional) additional `delay` (jitter).
     """
 
     period: timedelta
-    jitter: tuple[int, int] | None = dc.field(default=(1, 10))  # Enable kw_only when Python 3.10+
-    stop_on_error: bool = dc.field(default=False)  # Enable kw_only when Python 3.10+
+    delay: Callable[[], timedelta] = DEFAULT_JITTER
+    """
+    Additional delay for each iteration, in seconds.
 
-    # TODO Check repr()
+    Can be a fixed value, a random interval, or a custom delay factory.
+    """
+    stop_on_error: bool = False
+
+    def __repr__(self):
+        return f"every('{td_str(self.period)}', delay={self.delay!r})"
 
     async def __call__(self, _) -> AsyncGenerator[None, Any]:
         iter_n = 0
-        iter_delay = timedelta(0)  # Execute the first iteration immediately
+        iter_interval = timedelta(0)  # Execute the first iteration immediately
         while True:
             iter_n += 1
-            iter_jitter = random_jitter(self.jitter)
-            iter_total_delay = iter_delay + iter_jitter
+            iter_jitter = self.delay()
+            iter_delay = iter_interval + iter_jitter
             logger.debug(
-                "(every %s, iter %s) Sleeping for %s (delay: %s, jitter: %s)",
-                self.period,
+                "(every %s, iter %s) Sleeping for %s",
+                td_str(self.period),
                 iter_n,
-                iter_total_delay,
-                iter_delay,
-                iter_jitter,
+                td_str(iter_delay),
             )
-            await sleep(iter_total_delay)
+            await sleep(iter_delay)
             try:
                 yield
             except Exception:  # noqa
                 if self.stop_on_error:
                     raise
                 logger.exception("Error during task execution")
-            iter_delay = self.period
+            iter_interval = self.period
 
 
-# noinspection PyPep8Naming
-@final
+def every(period: timedelta | str, *, delay: DelayFactory = DEFAULT_JITTER, stop_on_error: bool = False) -> Every:
+    return Every(ensure_td(period), ensure_delay_factory(delay), stop_on_error)
+
+
 @dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
-class recurrent:
+class Recurrent:
     """
-    Triggers every `default_period` (unless overwritten), with a random `jitter`.
+    Triggers every `default_period` (unless overwritten), with an (optional) additional `delay` (jitter).
     """
 
-    default_interval: timedelta = timedelta(minutes=1)
-    jitter: tuple[int, int] | None = dc.field(default=(1, 10))  # Enable kw_only when Python 3.10+
-    stop_on_error: bool = dc.field(default=False)  # Enable kw_only when Python 3.10+
+    default_interval: timedelta
+    delay: Callable[[], timedelta] = DEFAULT_JITTER
+    """
+    Additional delay for each iteration, in seconds.
 
-    # TODO Check repr()
+    Can be a fixed value, a random interval, or a custom delay factory.
+    """
+    stop_on_error: bool = False
+
+    def __repr__(self):
+        return f"recurrent('{td_str(self.default_interval)}', delay={self.delay!r})"
 
     async def __call__(self, _) -> AsyncGenerator[None, timedelta]:
         iter_n = 0
-        iter_delay = timedelta(0)  # Execute the first iteration immediately
+        iter_interval = timedelta(0)  # Execute the first iteration immediately
         while True:
             iter_n += 1
-            iter_jitter = random_jitter(self.jitter)
-            iter_total_delay = iter_delay + iter_jitter
+            iter_jitter = self.delay()
+            iter_delay = iter_interval + iter_jitter
             logger.debug(
-                "(recurrent, iter %s) Sleeping for %s (delay: %s, jitter: %s)",
+                "(recurrent, iter %s) Sleeping for %s (interval: %s, delay: %s)",
                 iter_n,
-                iter_total_delay,
-                iter_delay,
-                iter_jitter,
+                td_str(iter_delay),
+                td_str(iter_interval),
+                td_str(iter_jitter),
             )
-            await sleep(iter_total_delay)
+            await sleep(iter_delay)
             try:
-                iter_delay = yield
-                if iter_delay is None:
-                    iter_delay = self.default_interval
+                iter_interval = yield
+                if iter_interval is None:
+                    iter_interval = self.default_interval
                 elif not isinstance(iter_delay, timedelta):
                     logger.warning("Invalid delta override (expected %s, got %s)", timedelta, type(iter_delay))
-                    iter_delay = self.default_interval
+                    iter_interval = self.default_interval
             except Exception:  # noqa
                 logger.warning("Error during task execution, using default period for the next iteration")
-                iter_delay = self.default_interval
+                iter_interval = self.default_interval
 
 
-# noinspection PyPep8Naming
-@final
+def recurrent(
+    default_interval: timedelta = timedelta(minutes=1),
+    *,
+    delay: DelayFactory = DEFAULT_JITTER,
+    stop_on_error: bool = False,
+) -> Recurrent:
+    return Recurrent(ensure_td(default_interval), ensure_delay_factory(delay), stop_on_error)
+
+
 @dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
-class after(Generic[T]):
+class After(Generic[T]):
     """
-    Triggers every time `task` is completed, with a random `jitter`.
+    Triggers every time `task` is completed, with an (optional) additional `delay` (jitter).
     """
 
     task: TaskT[T] | ScheduledTask[T, Any]
-    jitter: tuple[int, int] | None = dc.field(default=(1, 10))  # Enable kw_only when Python 3.10+
+    delay: Callable[[], timedelta] = DEFAULT_JITTER
+    """
+    Additional delay for each iteration, in seconds.
 
-    # TODO Check repr()
+    Can be a fixed value, a random interval, or a custom delay factory.
+    """
+
+    def __repr__(self):
+        return f"after({self.task}, delay={self.delay!r})"
+
+    @property
+    def _task_name(self):
+        return self.task.name if isinstance(self.task, ScheduledTask) else task_full_name(self.task)
 
     def __call__(self, scheduler_lifetime: SchedulerLifetime) -> AsyncGenerator[T, Any]:
         task_exec_flow = scheduler_lifetime.find_exec_for(self.task)
@@ -191,9 +228,9 @@ class after(Generic[T]):
                     logger.debug("(after %s) Source task has completed, so do we", task.name)
                     break
 
-                if self.jitter is not None:
-                    iter_jitter = random_jitter(self.jitter)
-                    logger.debug("(after %s) Sleeping for %s (iteration jitter)", task.name, iter_jitter)
+                iter_jitter = self.delay()
+                if iter_jitter.total_seconds() > 0:
+                    logger.debug("(after %s) Sleeping for %s", task.name, td_str(iter_jitter))
                     await sleep(iter_jitter)
 
                 try:
@@ -203,3 +240,7 @@ class after(Generic[T]):
                 except Exception:  # noqa
                     logger.warning("Error during task execution")
                     # Continue, as we are bound to the source task's lifecycle
+
+
+def after(task: TaskT[T] | ScheduledTask[T, Any], *, delay: DelayFactory = DEFAULT_JITTER) -> After[T]:
+    return After(task, ensure_delay_factory(delay))

@@ -14,7 +14,7 @@ logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 scheduler = Scheduler()
 
 
-@scheduler.task(every(timedelta(seconds=3), jitter=(0, 10)))
+@scheduler.task(every(timedelta(seconds=3), delay=(0, 10)))
 async def task1():
     """
     A simple repeating task that returns a random number.
@@ -23,7 +23,7 @@ async def task1():
     return random.randint(1, 22)
 
 
-@scheduler.task(after(task1, jitter=None))
+@scheduler.task(after(task1, delay=None))
 async def task2(r: str):
     """
     A task that runs after task1 and prints its result.
@@ -31,12 +31,13 @@ async def task2(r: str):
     print(f"task2 here! task1 result: {r}")
 
 
-@scheduler.task(recurrent(jitter=None))
+@scheduler.task(recurrent(delay=None))
 async def task3():
     """
     A more complex repeating task, which period is dynamically changed.
     """
     print("task3 here!")
+    # And override the next iteration's interval (delay)
     return timedelta(seconds=random.randint(3, 9))
 
 

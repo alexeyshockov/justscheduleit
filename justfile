@@ -6,8 +6,8 @@ default: sync-deps install-editable
 move: upgrade-deps sync-deps install-editable
 
 upgrade-pip:
-    pip install --upgrade pip wheel hatch pip-tools \
-      --disable-pip-version-check
+    pip install --upgrade --disable-pip-version-check \
+      pip wheel hatch pip-tools
 
 install-editable:
     pip install -e .

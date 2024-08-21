@@ -15,7 +15,7 @@ logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 scheduler = Scheduler()
 
 
-@scheduler.task(every(timedelta(seconds=5), jitter=None))
+@scheduler.task(every(timedelta(seconds=5), delay=None))
 async def graceful_long_async_task(cancel_scope: CancelScope):
     print(f"{graceful_long_async_task} is triggered!")
     with cancel_scope:
@@ -23,7 +23,7 @@ async def graceful_long_async_task(cancel_scope: CancelScope):
     print(f"{graceful_long_async_task} has finished!")
 
 
-@scheduler.task(every(timedelta(seconds=5), jitter=None))
+@scheduler.task(every(timedelta(seconds=5), delay=None))
 async def long_async_task():
     print(f"{long_async_task} is triggered!")
     await anyio.sleep(15)

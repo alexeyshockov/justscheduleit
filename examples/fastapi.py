@@ -10,7 +10,7 @@ from justscheduleit import Scheduler, every
 scheduler = Scheduler()
 
 
-@scheduler.task(every(timedelta(seconds=3), jitter=(1, 5)))
+@scheduler.task(every(timedelta(seconds=3), delay=(1, 5)))
 async def heavy_background_task():
     print("Some work here")
 
