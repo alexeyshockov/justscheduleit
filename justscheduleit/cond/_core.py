@@ -129,7 +129,7 @@ class Every:
             iter_interval = self.period
 
 
-def every(period: timedelta | str, *, delay: DelayFactory = DEFAULT_JITTER, stop_on_error: bool = False) -> Every:
+def every(period: timedelta | str, /, *, delay: DelayFactory = DEFAULT_JITTER, stop_on_error: bool = False) -> Every:
     return Every(ensure_td(period), ensure_delay_factory(delay), stop_on_error)
 
 
@@ -180,6 +180,7 @@ class Recurrent:
 
 def recurrent(
     default_interval: timedelta = timedelta(minutes=1),
+    /,
     *,
     delay: DelayFactory = DEFAULT_JITTER,
     stop_on_error: bool = False,
@@ -202,11 +203,8 @@ class After(Generic[T]):
     """
 
     def __repr__(self):
-        return f"after({self.task}, delay={self.delay!r})"
-
-    @property
-    def _task_name(self):
-        return self.task.name if isinstance(self.task, ScheduledTask) else task_full_name(self.task)
+        task = repr(self.task) if isinstance(self.task, ScheduledTask) else task_full_name(self.task)
+        return f"after({task!r}, delay={self.delay!r})"
 
     def __call__(self, scheduler_lifetime: SchedulerLifetime) -> AsyncGenerator[T, Any]:
         task_exec_flow = scheduler_lifetime.find_exec_for(self.task)
@@ -242,5 +240,5 @@ class After(Generic[T]):
                     # Continue, as we are bound to the source task's lifecycle
 
 
-def after(task: TaskT[T] | ScheduledTask[T, Any], *, delay: DelayFactory = DEFAULT_JITTER) -> After[T]:
+def after(task: TaskT[T] | ScheduledTask[T, Any], /, *, delay: DelayFactory = DEFAULT_JITTER) -> After[T]:
     return After(task, ensure_delay_factory(delay))

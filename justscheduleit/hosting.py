@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses as dc
 import inspect
 import logging
 import signal
@@ -7,7 +8,7 @@ import threading
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
 from threading import Thread
-from typing import Any, Awaitable, Callable, Optional, Protocol, TypeVar, Union, final
+from typing import Any, Awaitable, Callable, Optional, Protocol, TypeVar, Union, cast, final
 
 import anyio
 from anyio import (
@@ -19,11 +20,11 @@ from anyio import (
     get_cancelled_exc_class,
     open_signal_receiver,
 )
-from anyio.abc import TaskStatus
+from anyio.abc import TaskGroup, TaskStatus
 from anyio.from_thread import BlockingPortal, start_blocking_portal
-from typing_extensions import ParamSpec
+from typing_extensions import Mapping, ParamSpec
 
-from justscheduleit._utils import HANDLED_SIGNALS, EventView, choose_anyio_backend, observe_event
+from justscheduleit._utils import HANDLED_SIGNALS, EventView, choose_anyio_backend, observe_event, task_full_name
 
 T = TypeVar("T")
 TriggerEventT = TypeVar("TriggerEventT")
@@ -145,7 +146,7 @@ class ServiceLifetime(Protocol):
 
 
 class _ServiceLifetime:  # (ServiceLifetime, ServiceStateManager)
-    name: str
+    service: ServiceDescriptor
     host_lifetime: _HostLifetime
 
     started: Event
@@ -154,15 +155,19 @@ class _ServiceLifetime:  # (ServiceLifetime, ServiceStateManager)
 
     graceful_shutdown_scope: CancelScope | None
 
-    __slots__ = ("name", "host_lifetime", "started", "shutting_down", "stopped", "graceful_shutdown_scope")
+    __slots__ = ("service", "host_lifetime", "started", "shutting_down", "stopped", "graceful_shutdown_scope")
 
-    def __init__(self, host_lifetime: _HostLifetime, name: str):
+    def __init__(self, service: ServiceDescriptor, host_lifetime: _HostLifetime):
+        self.service = service
         self.host_lifetime = host_lifetime
-        self.name = name
         self.started = Event()
         self.shutting_down = Event()
         self.stopped = Event()
         self.graceful_shutdown_scope = None
+
+    @property
+    def name(self):
+        return self.service.name
 
     @property
     def host_portal(self) -> BlockingPortal:
@@ -200,10 +205,6 @@ class CoroutineService:
     """
     Does the service function accept AnyIO task status argument or not.
     """
-    lifetime_aware: bool
-    """
-    Does the service function accept ServiceLifetime argument or not.
-    """
 
     __slots__ = ("func", "task_status_aware", "lifetime_aware")
 
@@ -212,19 +213,14 @@ class CoroutineService:
         # Try to detect if the function's additional capabilities, can be overridden by the user
         func_signature = inspect.signature(func)
         self.task_status_aware = "task_status" in func_signature.parameters
-        self.lifetime_aware = "service_lifetime" in func_signature.parameters
 
     async def execute(self, lifetime: ServiceLifetime) -> None:
         if self.task_status_aware:
             service_task_status = self._ExecStatus(lifetime)
             await self.func(task_status=service_task_status)
-        elif self.lifetime_aware:
-            await self.func(service_lifetime=lifetime)
         else:
             lifetime.set_started()
             await self.func()
-
-        # TODO Service shutdown timeout
 
 
 @final
@@ -302,61 +298,220 @@ class HostService:
         self.host = host
 
     async def execute(self, service_lifetime: ServiceLifetime) -> None:
+        portal = service_lifetime.host_portal
         logger.debug("Starting host as a service...")
         host_lifetime: HostLifetime
-        async with self.host.aserve_in(service_lifetime.host_portal) as host_lifetime:
-            async with create_task_group() as tg:
-                # Service supervisor will cancel this scope on shutdown, instead of the whole service task
-                service_lifetime.graceful_shutdown_scope = tg.cancel_scope
+        async with self.host.aserve(portal) as host_lifetime:
+            async with create_task_group() as obs_tg:
+                # Service supervisor will cancel this (inner) scope on shutdown, not the whole task. So the context
+                # manager will exit normally, shutting down the host.
+                service_lifetime.graceful_shutdown_scope = obs_tg.cancel_scope
                 # Host lifetime observers, to update the service state
-                observe_event(tg, host_lifetime.started, lambda: service_lifetime.set_started())
-                observe_event(tg, host_lifetime.shutting_down, lambda: service_lifetime.shutdown())
-                observe_event(tg, host_lifetime.stopped, lambda: service_lifetime.shutdown())
+                observe_event(obs_tg, host_lifetime.started, lambda: service_lifetime.set_started())
+                observe_event(obs_tg, host_lifetime.shutting_down, lambda: service_lifetime.shutdown())
+                observe_event(obs_tg, host_lifetime.stopped, lambda: service_lifetime.shutdown())
 
 
 def _create_service(target: HostedService) -> Service:
+    # If the target is not callable, a TypeError will be raised
+    target_signature = inspect.signature(target)
+
     if inspect.iscoroutinefunction(target):
+        if len(target_signature.parameters) == 1 and "service_lifetime" in target_signature.parameters:
+            return target  # type: ignore
         return CoroutineService(target).execute
     else:
         return SyncService(target).execute
 
 
 @final
+@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
+class ServiceDescriptor:
+    func: Service
+    name: str
+
+    # Enable kw_only when Python 3.10+, for optional arguments
+    daemon: bool = False
+    # start_timeout: float | None = None  # TODO Implement later
+
+
+class _ServiceSupervisor:
+    lifetime: _ServiceLifetime
+
+    __slots__ = ("lifetime",)
+
+    def __init__(self, lifetime: _ServiceLifetime):
+        self.lifetime = lifetime
+
+    def shutdown(self):
+        self.lifetime.shutdown()
+
+    async def execute(self):
+        name = self.lifetime.service.name
+        service_lifetime = self.lifetime
+        service_func = self.lifetime.service.func
+
+        def service_stopped():
+            service_lifetime.stopped.set()
+            logger.debug(f"{name} stopped")
+
+        async def observe_service_started():
+            await service_lifetime.started.wait()
+            logger.debug(f"{name} started")
+
+        async def observe_service_shutdown(scope: CancelScope):
+            await service_lifetime.shutting_down.wait()
+            if not service_lifetime.stopped.is_set():
+                scope = service_lifetime.graceful_shutdown_scope if service_lifetime.graceful_shutdown_scope else scope
+                scope.cancel()
+
+        async with create_task_group() as service_tg:
+            service_tg.start_soon(observe_service_started)
+            service_tg.start_soon(observe_service_shutdown, service_tg.cancel_scope)
+            try:
+                logger.debug(f"Starting {name}...")
+                await service_func(service_lifetime)
+            except get_cancelled_exc_class():  # noqa
+                raise  # Propagate the cancellation
+            except Exception:  # noqa
+                logger.exception(f"{name} crashed")
+            finally:
+                service_stopped()
+                service_tg.cancel_scope.cancel()  # Shutdown all the observers
+
+
+class _ServicesSupervisor:
+    services: list[_ServiceSupervisor]
+    host_lifetime: _HostLifetime
+
+    __slots__ = ("services", "host_lifetime")
+
+    def __init__(self, host: Host, host_lifetime: _HostLifetime):
+        self.host_lifetime = host_lifetime
+        self.services = [
+            _ServiceSupervisor(_ServiceLifetime(service, host_lifetime)) for service in host.services.values()
+        ]
+
+    async def execute(self):  # noqa: C901 (ignore complexity)
+        host_lifetime = self.host_lifetime
+        services = self.services
+        services_cnt = len(services)
+        foreground_services_cnt = sum(not service.lifetime.service.daemon for service in services)
+        services_started = 0
+        all_services_started = Event()
+        foreground_services_stopped = 0  # Non-daemon services
+        all_foreground_services_stopped = Event()
+        services_stopped = 0
+        all_services_stopped = Event()
+
+        async def observe_service_started(service_lifetime: _ServiceLifetime):
+            nonlocal services_started
+            await service_lifetime.started.wait()
+            services_started += 1
+            if services_started == services_cnt:
+                # TODO Host start timeout
+                all_services_started.set()
+
+        async def observe_service_stopped(service_lifetime: _ServiceLifetime):
+            nonlocal services_stopped, foreground_services_stopped
+            await service_lifetime.stopped.wait()
+            if not service_lifetime.service.daemon:
+                foreground_services_stopped += 1
+            services_stopped += 1
+            if foreground_services_stopped == foreground_services_cnt:
+                all_foreground_services_stopped.set()
+            if services_stopped == services_cnt:
+                all_services_stopped.set()
+
+        def start():
+            for service in services:
+                services_tg.start_soon(observe_service_started, service.lifetime)
+                services_tg.start_soon(observe_service_stopped, service.lifetime)
+                services_tg.start_soon(service.execute)  # type: ignore
+
+        def shutdown():
+            for service in services:
+                service.shutdown()
+
+        def stop():
+            services_tg.cancel_scope.cancel()
+
+        async def observe_host_shutdown():
+            await host_lifetime.shutting_down.wait()
+            logger.debug("Shutting down...")
+            shutdown()
+
+        async def observe_all_services_started():
+            await all_services_started.wait()
+            logger.debug("All services started")
+            host_lifetime.started.set()
+
+        if not services:
+            logger.warning("No services to run")
+            return
+
+        async with create_task_group() as services_tg:  # Maybe exec_tg from above...
+            services_tg.start_soon(observe_host_shutdown)  # type: ignore
+            services_tg.start_soon(observe_all_services_started)  # type: ignore
+
+            logger.debug("Starting services...")
+            start()
+
+            await all_foreground_services_stopped.wait()
+            logger.debug("All foreground services stopped, shutting down daemon services...")
+            shutdown()
+
+            await all_services_stopped.wait()
+            logger.debug("All services stopped")
+            stop()  # Shutdown all the observers
+
+
+@final
 class Host:
     name: str
-    services: dict[str, Service]
+    _services: dict[str, ServiceDescriptor]
     _lifetime: _HostLifetime | None
 
-    __slots__ = ("name", "services", "_lifetime")
+    __slots__ = ("name", "_services", "_lifetime")
 
     def __init__(self, name: str | None = None):
         self.name = name or "default_host"
-        self.services = {}
+        self._services = {}
         self._lifetime = None
 
     def __repr__(self):
-        return f"<{self.__class__.__name__} services={self.services.keys()!r}>"
+        return f"<{self.__class__.__name__} services={self._services.keys()!r}>"
 
-    def add_service(self, func: HostedService, name: str | None = None) -> Service:
-        if name:
-            service_name = name
-        elif hasattr(func, "__name__"):
-            service_name = func.__name__
-        else:
-            raise ValueError("Service name must be provided")
+    @property
+    def services(self) -> Mapping[str, ServiceDescriptor]:
+        return self._services
 
-        if service_name in self.services:
-            raise ValueError(f"Service {service_name} is already registered")
-        service = self.services[service_name] = _create_service(func)
+    def _add_service(self, service: ServiceDescriptor) -> ServiceDescriptor:
+        if service.name in self._services:
+            raise ValueError(f"Service {service.name} is already registered")
+        self._services[service.name] = service
         return service
 
-    def service(self, name: str | None = None) -> Callable[[Callable[P, T]], Callable[P, T]]:
+    def add_service(self, func: Service, /, *, name: str | None = None, daemon: bool = False) -> ServiceDescriptor:
         """
-        Decorator to register a hosted service.
+        Register a service in the host.
+
+        :param func: A service function.
+        :param name: An (optional) uniq name for the service. If not provided, will be generated from the function name.
+        :param daemon: If True, the service won't prevent the host from stopping when all non-daemon services are done.
+        :return: The service descriptor.
+        """
+        return self._add_service(ServiceDescriptor(func, name if name else task_full_name(func), daemon))
+
+    def service(self, name: str | None = None, /, *, daemon: bool = False) -> Callable[[Callable[P, T]], Callable[P, T]]:
+        """
+        Decorator to register an (async) function as a hosted service.
         """
 
         def decorator(func: Callable[P, T]) -> Callable[P, T]:
-            self.add_service(func, name)
+            self._add_service(
+                ServiceDescriptor(_create_service(func), name=name if name else task_full_name(func), daemon=daemon)
+            )
             return func
 
         return decorator
@@ -371,10 +526,21 @@ class Host:
             raise BusyResourceError("running")  # Like an AnyIO resource guard
 
     @asynccontextmanager
-    async def aserve(self) -> AsyncGenerator[HostLifetime, Any]:
+    async def aserve(self, portal: BlockingPortal | None = None) -> AsyncGenerator[HostLifetime, Any]:
+        """
+        Start the host in the current event loop.
+
+        :param portal: An optional portal for the current event loop (thread), if already created.
+        :return: A context manager that yields the host lifetime.
+        """
+
         logger.debug("Starting host...")
-        async with BlockingPortal() as portal, self.aserve_in(portal) as lifetime:
-            yield lifetime
+        if portal is None:
+            async with BlockingPortal() as portal, self._aserve_in(portal) as lifetime:
+                yield lifetime
+        else:
+            async with create_task_group() as exec_tg, self._aserve_in(portal, exec_tg) as lifetime:
+                yield lifetime
 
     @contextmanager
     def serve(self) -> Generator[HostLifetime, Any, None]:
@@ -388,123 +554,47 @@ class Host:
         """
         logger.debug("Starting host in a separate thread...")
         with start_blocking_portal(**choose_anyio_backend()) as thread:
-            with thread.wrap_async_context_manager(self.aserve_in(thread)) as lifetime:
+            with thread.wrap_async_context_manager(self._aserve_in(thread)) as lifetime:
                 yield lifetime
 
     @asynccontextmanager
-    async def aserve_in(self, portal: BlockingPortal) -> AsyncGenerator[HostLifetime, Any]:
-        self._check_running()
-        try:
-            async with create_task_group() as exec_tg:
-                lifetime = self._lifetime = _HostLifetime(portal, exec_tg.cancel_scope)
-                exec_tg.start_soon(self._execute, lifetime)
-                yield lifetime
-                lifetime.shutdown()
-        finally:
-            self._lifetime = None
+    async def _aserve_in(self, portal: BlockingPortal, exec_tg: TaskGroup | None = None):
+        exec_tg = portal._task_group if exec_tg is None else exec_tg  # noqa
+        lifetime = cast(HostLifetime, await exec_tg.start(self._execute, portal, exec_tg))
+        yield lifetime
+        lifetime.shutdown()
 
-    async def aexecute(self, *, task_status: TaskStatus[HostLifetime] = TASK_STATUS_IGNORED) -> None:
-        self._check_running()
-        try:
-            logger.debug("Starting host...")
+    async def aexecute(
+        self, portal: BlockingPortal | None = None, *, task_status: TaskStatus[HostLifetime] = TASK_STATUS_IGNORED
+    ) -> None:
+        logger.debug("Starting host...")
+        if portal is None:
             async with BlockingPortal() as portal:
                 exec_tg = portal._task_group  # noqa
-                lifetime = self._lifetime = _HostLifetime(portal, exec_tg.cancel_scope)
+                lifetime: HostLifetime = await exec_tg.start(self._execute, portal, exec_tg)
                 task_status.started(lifetime)
-                await self._execute(lifetime)
-        finally:
-            self._lifetime = None
+        else:
+            async with create_task_group() as exec_tg:
+                lifetime: HostLifetime = await exec_tg.start(self._execute, portal, exec_tg)
+                task_status.started(lifetime)
 
-    async def _execute(self, lifetime: _HostLifetime) -> None:  # noqa: C901 (too complex)
-        services = self.services.copy()  # Freeze the state
-        service_lifetimes: dict[str, _ServiceLifetime] = {}
-        services_started = 0
-        all_services_started = Event()
-        services_stopped = 0
-        all_services_stopped = Event()
-
-        def service_started(service_lifetime: _ServiceLifetime):
-            nonlocal services_started
-            logger.debug(f"{service_lifetime.name} started")
-            services_started += 1
-            if services_started == len(services):
-                # TODO Host start timeout
-                all_services_started.set()
-
-        def service_stopped(service_lifetime: _ServiceLifetime):
-            nonlocal services_stopped
-            service_lifetime.stopped.set()
-            logger.debug(f"{service_lifetime.name} stopped")
-            services_stopped += 1
-            if services_stopped == len(services):
-                # TODO Host shutdown timeout
-                all_services_stopped.set()
-
-        async def observe_service_started(service_lifetime: _ServiceLifetime):
-            await service_lifetime.started.wait()
-            service_started(service_lifetime)
-
-        async def observe_service_shutdown(service_lifetime: _ServiceLifetime, scope: CancelScope):
-            await service_lifetime.shutting_down.wait()
-            if not service_lifetime.stopped.is_set():
-                scope = service_lifetime.graceful_shutdown_scope if service_lifetime.graceful_shutdown_scope else scope
-                scope.cancel()
-
-        async def supervise_service(name: str, service: Service):
-            async with create_task_group() as service_tg:
-                service_lifetime = service_lifetimes[name] = _ServiceLifetime(lifetime, name)
-                service_tg.start_soon(observe_service_started, service_lifetime)
-                service_tg.start_soon(observe_service_shutdown, service_lifetime, service_tg.cancel_scope)
-                try:
-                    logger.debug(f"Starting {name}...")
-                    await service(service_lifetime)
-                except get_cancelled_exc_class():  # noqa
-                    raise  # Propagate the cancellation
-                except Exception:  # noqa
-                    logger.exception(f"{name} crashed")
-                finally:
-                    service_stopped(service_lifetime)
-                    service_tg.cancel_scope.cancel()  # Shutdown all the observers
-
-        def shutdown():
-            for service in service_lifetimes.values():
-                service.shutdown()
-
-        def stop():
-            tg.cancel_scope.cancel()
-
-        async def observe_host_shutdown():
-            await lifetime.shutting_down.wait()
-            if not lifetime.started.is_set():
-                logger.debug("Startup hasn't been completed, canceling everything")
-                stop()
-            else:
-                logger.debug("Shutting down...")
-                shutdown()
-
-        async def observe_all_services_started():
-            await all_services_started.wait()
-            logger.debug("All services started")
-            lifetime.started.set()
-
+    async def _execute(
+        self,
+        portal: BlockingPortal,
+        exec_tg: TaskGroup,
+        *,
+        task_status: TaskStatus[_HostLifetime] = TASK_STATUS_IGNORED,
+    ):
+        self._check_running()
+        lifetime = self._lifetime = _HostLifetime(portal, exec_tg.cancel_scope)
         try:
-            if not services:
-                logger.warning("No services to run")
-
-            async with create_task_group() as tg:
-                tg.start_soon(observe_host_shutdown)  # type: ignore
-                tg.start_soon(observe_all_services_started)  # type: ignore
-
-                logger.debug("Starting services...")
-                for service_name, service_impl in services.items():
-                    tg.start_soon(supervise_service, service_name, service_impl)
-
-                await all_services_stopped.wait()
-                logger.debug("All services stopped")
-                tg.cancel_scope.cancel()  # Shutdown all the observers
+            task_status.started(lifetime)
+            services_supervisor = _ServicesSupervisor(self, lifetime)
+            await services_supervisor.execute()
         finally:
             lifetime.stopped.set()
             logger.debug("Host stopped")
+            self._lifetime = None
 
 
 async def arun(host: Host):

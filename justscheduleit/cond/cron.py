@@ -14,7 +14,7 @@ from justscheduleit.scheduler import SchedulerLifetime
 __all__ = ["cron"]
 
 
-@dc.dataclass(frozen=True)  # Enable kw_only when Python 3.10+
+@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
 class Cron:
     """
     Triggers according to the cron schedule, with an (optional) additional `delay` (jitter).
@@ -55,7 +55,7 @@ class Cron:
                 logger.exception("Error during task execution")
 
 
-def cron(schedule: str | croniter, *, delay: DelayFactory = DEFAULT_JITTER, stop_on_error: bool = False) -> Cron:
+def cron(schedule: str | croniter, /, *, delay: DelayFactory = DEFAULT_JITTER, stop_on_error: bool = False) -> Cron:
     return Cron(
         schedule if isinstance(schedule, croniter) else croniter(schedule), ensure_delay_factory(delay), stop_on_error
     )

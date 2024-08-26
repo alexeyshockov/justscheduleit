@@ -27,9 +27,15 @@ if sys.platform == "win32":  # pragma: py-not-win32
     HANDLED_SIGNALS += (signal.SIGBREAK,)  # Windows signal 21. Sent by Ctrl+Break.
 
 
-def task_full_name(func: Callable) -> str:  # Task ID?..
-    module = func.__module__
-    name = func.__qualname__
+# TODO Rename (callable_id, task_id, something else?..)
+def task_full_name(func: Callable) -> str:
+    try:
+        module = func.__module__
+        name = func.__qualname__
+    except AttributeError:  # A callable object (with a __call__ method) case
+        func_t = type(func)
+        module = func_t.__module__
+        name = func_t.__qualname__
     if module is None or module == "__builtin__" or module == "__main__":
         return name
     return module + "." + name
@@ -41,6 +47,7 @@ def ensure_td(value: timedelta | str) -> timedelta:
     elif isinstance(value, str):
         try:
             import pytimeparse2
+
             use_dateutil = pytimeparse2.HAS_RELITIVE_TIMEDELTA
 
             try:
@@ -91,12 +98,12 @@ class FixedDelay:
 
     @classmethod
     def create(cls, value: int | float | timedelta | None) -> Self:
-        if isinstance(value, (int, float)):
+        if value is None or value == 0:
+            delay = TD_ZERO
+        elif isinstance(value, (int, float)):
             delay = timedelta(seconds=value)
         elif isinstance(value, timedelta):
             delay = value
-        elif value is None:
-            delay = TD_ZERO
         else:
             raise ValueError(f"Invalid delay: {value!r}")
 
@@ -113,11 +120,11 @@ class FixedDelay:
 
 
 def ensure_delay_factory(delay: DelayFactory) -> Callable[[], timedelta]:
-    if isinstance(delay, tuple):
+    if isinstance(delay, tuple):  # tuple[int, int] | tuple[float, float]
         return RandomDelay(delay)  # type: ignore
     elif callable(delay):
         return delay
-    else:
+    else:  # int | float | timedelta | None
         return FixedDelay.create(delay)
 
 

@@ -177,9 +177,9 @@ class _TaskExecution(Generic[T, TriggerEventT]):
 @dc.dataclass(frozen=True)
 class ScheduledTask(Generic[T, TriggerEventT]):
     name: str
-    trigger: TriggerFactory[TriggerEventT, T]
     target: TaskT[T]
-    event_aware: bool
+    trigger: TriggerFactory[TriggerEventT, T]
+    event_aware: bool = False
     """
     Whether the target function accepts an event parameter.
 
@@ -187,9 +187,12 @@ class ScheduledTask(Generic[T, TriggerEventT]):
     autodetect value is incorrect).
     """
 
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.name!r}, {self.trigger!r})"
+
     @classmethod
-    def create(cls, trigger: TriggerFactory, target: TaskT[T], *, name: str | None = None) -> Self:
-        return cls(name or task_full_name(target), trigger, target, len(inspect.signature(target).parameters) > 0)
+    def create(cls, target: TaskT[T], trigger: TriggerFactory, *, name: str | None = None) -> Self:
+        return cls(name or task_full_name(target), target, trigger, len(inspect.signature(target).parameters) > 0)
 
 
 @final
@@ -304,12 +307,12 @@ class Scheduler:
 
     def add_task(
         self,
-        trigger: TriggerFactory[TriggerEventT, T],
         func: TaskT[T],
+        trigger: TriggerFactory[TriggerEventT, T],
         *,
         name: str | None = None,
     ) -> ScheduledTask[T, TriggerEventT]:
-        task = ScheduledTask.create(trigger, func, name=name)
+        task = ScheduledTask.create(func, trigger, name=name)
         self.tasks.append(task)
         return task
 
@@ -319,7 +322,7 @@ class Scheduler:
         """
 
         def decorator(func: Callable[P, T]) -> Callable[P, T]:
-            self.add_task(trigger, func, name=name)
+            self.add_task(func, trigger, name=name)
             return func
 
         return decorator
@@ -334,12 +337,12 @@ class Scheduler:
         try:
             tasks_host = Host(f"{self.name}_tasks_host")
             for exec_flow in tasks:
-                task_exec = _TaskExecution(exec_flow, scheduler_lifetime)
-                tasks_host.services[exec_flow.task.name] = task_exec
+                tasks_host.add_service(_TaskExecution(exec_flow, scheduler_lifetime), name=exec_flow.task.name)
             tasks_host_lifetime: HostLifetime
-            async with tasks_host.aserve_in(service_lifetime.host_portal) as tasks_host_lifetime:
+            async with tasks_host.aserve(service_lifetime.host_portal) as tasks_host_lifetime:
                 async with create_task_group() as tg:
-                    # Service supervisor will cancel this scope on shutdown, instead of the whole service task
+                    # Service supervisor will cancel this (inner) scope on shutdown, not the whole task. So the context
+                    # manager will exit normally, shutting down the host.
                     service_lifetime.graceful_shutdown_scope = tg.cancel_scope
                     # Host lifetime observers, to update the service state
                     observe_event(tg, tasks_host_lifetime.started, lambda: service_lifetime.set_started())
@@ -351,7 +354,7 @@ class Scheduler:
 
 def _host(scheduler: Scheduler):
     host = Host(f"{scheduler.name}_host")
-    host.services["scheduler"] = scheduler
+    host.add_service(scheduler, name="scheduler")
     return host
 
 

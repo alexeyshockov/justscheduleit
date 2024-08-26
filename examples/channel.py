@@ -5,6 +5,7 @@ import logging
 import anyio
 
 from justscheduleit import Scheduler, every
+from justscheduleit.cond import take_first
 from justscheduleit.hosting import Host
 
 logging.basicConfig()
@@ -14,11 +15,14 @@ logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 channel_writer, channel_reader = anyio.create_memory_object_stream[str]()
 
+scheduler = Scheduler()
+
 host = Host()
-scheduler = host.services["scheduler"] = Scheduler()
+host.add_service(scheduler, name="scheduler")
 
 
-@host.service()
+# Does not hold the host alive, if the scheduler is done
+@host.service(daemon=True)
 async def print_channel():
     """
     A hosted service, to read the channel in the background.
@@ -28,7 +32,7 @@ async def print_channel():
             print(f"Message received: {message}")
 
 
-@scheduler.task(every("3s", delay=(1, 5)))
+@scheduler.task(take_first(3, every("3s", delay=(1, 3))))
 async def scheduled_background_task():
     print("Scheduled work here, writing to the channel...")
     await channel_writer.send("hello from the background task!")
