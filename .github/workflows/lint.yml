@@ -7,6 +7,13 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: read
+      # To report GitHub Actions status checks
+      statuses: write
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,7 +27,7 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip wheel
           python3 -m pip install -r requirements.txt --disable-pip-version-check
-      - uses: github/super-linter/slim@v6
+      - uses: github/super-linter/slim@v7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Only new files
