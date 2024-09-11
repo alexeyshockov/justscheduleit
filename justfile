@@ -6,8 +6,7 @@ default: sync-deps install-editable
 move: upgrade-deps sync-deps install-editable
 
 upgrade-pip:
-    pip install --upgrade --disable-pip-version-check \
-      pip wheel hatch pip-tools
+    pip install --upgrade --disable-pip-version-check pip wheel hatch pip-tools
 
 install-editable:
     pip install -e .
@@ -36,8 +35,7 @@ sync-deps: upgrade-pip
 check-style:
     ruff check justscheduleit examples
 check-types:
-    #pyright --pythonpath $(which python) justscheduleit examples
-    pyright --pythonpath $(which python) justscheduleit
+    pyright --pythonpath $(which python) justscheduleit examples
 check: check-style check-types
 
 
@@ -46,3 +44,13 @@ alias fix-style := format
 format:
     ruff check --fix justscheduleit examples
     ruff format justscheduleit examples
+
+
+
+# $> just why starlette
+# starlette==0.27.0
+# ├── fastapi==0.101.1 [requires: starlette>=0.27.0,<0.28.0]
+# │   └── fastapi-rfc7807==0.5.0 [requires: fastapi]
+# └── fastapi-rfc7807==0.5.0 [requires: starlette]
+why package:
+    pipdeptree -r -p {{package}}

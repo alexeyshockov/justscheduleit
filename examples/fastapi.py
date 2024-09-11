@@ -17,11 +17,13 @@ async def heavy_background_task():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    async with scheduler.aserve():
+    from justscheduleit.scheduler import aserve
+
+    # Scheduler in the same thread, same event loop
+    async with aserve(scheduler):
         yield
 
 
-# Or Starlette
 app = FastAPI(lifespan=lifespan)
 
 

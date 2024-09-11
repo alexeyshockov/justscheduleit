@@ -1,5 +1,5 @@
-from datetime import timedelta, datetime
-from unittest.mock import patch, MagicMock, AsyncMock
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from croniter import croniter

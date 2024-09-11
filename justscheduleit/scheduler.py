@@ -34,7 +34,8 @@ from typing_extensions import ParamSpec, Self, overload
 from justscheduleit._utils import NULL_CM, EventView, choose_anyio_backend, observe_event, task_full_name
 from justscheduleit.hosting import Host, HostLifetime, ServiceLifetime
 
-if TYPE_CHECKING:  # Optional dependencies
+# Optional dependencies
+if TYPE_CHECKING:
     # noinspection PyPackageRequirements
     from opentelemetry.trace import Tracer, TracerProvider
 
@@ -282,8 +283,10 @@ class Scheduler:
             # noinspection PyPackageRequirements
             from opentelemetry.trace import get_tracer_provider
 
+            from justscheduleit import __version__
+
             tracer_provider = tracer_provider or get_tracer_provider()
-            self._tracer = tracer_provider.get_tracer(__name__)  # TODO Version
+            self._tracer = tracer_provider.get_tracer(__name__, __version__)
         except ImportError:
             raise RuntimeError("OpenTelemetry package is not available") from None
 
@@ -298,9 +301,9 @@ class Scheduler:
 
     @property
     def lifetime(self) -> SchedulerLifetime:
-        if self._lifetime is None:
-            raise RuntimeError("Scheduler not running")
-        return self._lifetime
+        if self._lifetime:
+            return self._lifetime
+        raise RuntimeError("Scheduler not running")
 
     def __repr__(self):
         return f"<{self.__class__.__name__} with {len(self.tasks)} tasks>"

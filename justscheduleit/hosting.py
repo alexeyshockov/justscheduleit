@@ -7,6 +7,7 @@ import signal
 import threading
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
+from enum import Enum
 from threading import Thread
 from typing import Any, Awaitable, Callable, Optional, Protocol, TypeVar, Union, cast, final
 
@@ -30,25 +31,22 @@ T = TypeVar("T")
 TriggerEventT = TypeVar("TriggerEventT")
 P = ParamSpec("P")
 
-# Lifespan = Union[
-#     AbstractAsyncContextManager,
-#     AbstractContextManager,
-# ]
-
-HostedService = Union[
-    # AbstractAsyncContextManager,
-    # AbstractContextManager,
-    Callable[P, Awaitable[T]], Callable[P, T]
-]
+HostedService = Union[Callable[P, Awaitable[T]], Callable[P, T]]
 
 
 logger = logging.getLogger(__name__)
 
 
-class Asgi3Adapter:
-    # Implement later, to run a host in an ASGI3-compatible server.
-    # Not something really useful, as you can always run a host as a Starlette/FastAPI lifespan.
-    pass
+# class Asgi3Adapter:
+#     pass
+# Maybe implement later, to run a host in an ASGI3-compatible server.
+# Not something really useful, as you can always run a host as a Starlette/FastAPI lifespan.
+
+
+class HostState(Enum):
+    STARTING = "STARTED"
+    SHUTTING_DOWN = "SHUTTING_DOWN"
+    STOPPED = "STOPPED"
 
 
 class HostLifetime(Protocol):
@@ -56,6 +54,9 @@ class HostLifetime(Protocol):
 
     @property
     def portal(self) -> BlockingPortal: ...
+
+    @property
+    def service_lifetimes(self) -> Mapping[str, ServiceLifetime]: ...
 
     @property
     def started(self) -> EventView: ...
@@ -75,20 +76,15 @@ class HostLifetime(Protocol):
 
 
 class _HostLifetime:
-    thread_id: int
-    portal: BlockingPortal
-    _scope: CancelScope
+    __slots__ = ("thread_id", "_scope", "portal", "service_lifetimes", "started", "shutting_down", "stopped")
 
-    started: Event  # Ideally an event view, without set()...
-    shutting_down: Event
-    stopped: Event
-
-    __slots__ = ("thread_id", "portal", "_scope", "started", "shutting_down", "stopped")
-
-    def __init__(self, portal: BlockingPortal, scope: CancelScope):
+    def __init__(self, host: Host, portal: BlockingPortal, scope: CancelScope):
         self.thread_id = threading.get_ident()
-        self.portal = portal
         self._scope = scope
+
+        self.portal = portal
+
+        self.service_lifetimes = {name: _ServiceLifetime(service, self) for name, service in host.services.items()}
 
         self.started = Event()
         self.shutting_down = Event()
@@ -145,25 +141,14 @@ class ServiceLifetime(Protocol):
     def shutdown(self) -> None: ...
 
 
-class _ServiceLifetime:  # (ServiceLifetime, ServiceStateManager)
+@dc.dataclass(slots=True)
+class _ServiceLifetime:
     service: ServiceDescriptor
     host_lifetime: _HostLifetime
-
-    started: Event
-    shutting_down: Event
-    stopped: Event
-
-    graceful_shutdown_scope: CancelScope | None
-
-    __slots__ = ("service", "host_lifetime", "started", "shutting_down", "stopped", "graceful_shutdown_scope")
-
-    def __init__(self, service: ServiceDescriptor, host_lifetime: _HostLifetime):
-        self.service = service
-        self.host_lifetime = host_lifetime
-        self.started = Event()
-        self.shutting_down = Event()
-        self.stopped = Event()
-        self.graceful_shutdown_scope = None
+    started: Event = dc.field(default_factory=Event)
+    shutting_down: Event = dc.field(default_factory=Event)
+    stopped: Event = dc.field(default_factory=Event)
+    graceful_shutdown_scope: CancelScope | None = None
 
     @property
     def name(self):
@@ -325,19 +310,18 @@ def _create_service(target: HostedService) -> Service:
 
 
 @final
-@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
+@dc.dataclass(frozen=True, slots=True)
 class ServiceDescriptor:
     func: Service
     name: str
 
-    # Enable kw_only when Python 3.10+, for optional arguments
     daemon: bool = False
-    # start_timeout: float | None = None  # TODO Implement later
+
+    # start_timeout: float | None = None
+    # Maybe implement later
 
 
 class _ServiceSupervisor:
-    lifetime: _ServiceLifetime
-
     __slots__ = ("lifetime",)
 
     def __init__(self, lifetime: _ServiceLifetime):
@@ -362,8 +346,10 @@ class _ServiceSupervisor:
         async def observe_service_shutdown(scope: CancelScope):
             await service_lifetime.shutting_down.wait()
             if not service_lifetime.stopped.is_set():
-                scope = service_lifetime.graceful_shutdown_scope if service_lifetime.graceful_shutdown_scope else scope
-                scope.cancel()
+                if graceful_shutdown_scope := service_lifetime.graceful_shutdown_scope:
+                    graceful_shutdown_scope.cancel()
+                else:
+                    scope.cancel()
 
         async with create_task_group() as service_tg:
             service_tg.start_soon(observe_service_started)
@@ -503,7 +489,9 @@ class Host:
         """
         return self._add_service(ServiceDescriptor(func, name if name else task_full_name(func), daemon))
 
-    def service(self, name: str | None = None, /, *, daemon: bool = False) -> Callable[[Callable[P, T]], Callable[P, T]]:
+    def service(
+        self, name: str | None = None, /, *, daemon: bool = False
+    ) -> Callable[[Callable[P, T]], Callable[P, T]]:
         """
         Decorator to register an (async) function as a hosted service.
         """
@@ -517,9 +505,10 @@ class Host:
         return decorator
 
     @property
-    def lifetime(self):
-        if not self._lifetime:
-            raise RuntimeError("Host is not running")
+    def lifetime(self) -> HostLifetime:
+        if self._lifetime:
+            return self._lifetime  # type: ignore
+        raise RuntimeError("Host is not running")
 
     def _check_running(self):
         if self._lifetime is not None:
@@ -573,6 +562,7 @@ class Host:
                 exec_tg = portal._task_group  # noqa
                 lifetime: HostLifetime = await exec_tg.start(self._execute, portal, exec_tg)
                 task_status.started(lifetime)
+                await lifetime.stopped.wait()  # Otherwise the portal will be closed immediately
         else:
             async with create_task_group() as exec_tg:
                 lifetime: HostLifetime = await exec_tg.start(self._execute, portal, exec_tg)
@@ -586,7 +576,7 @@ class Host:
         task_status: TaskStatus[_HostLifetime] = TASK_STATUS_IGNORED,
     ):
         self._check_running()
-        lifetime = self._lifetime = _HostLifetime(portal, exec_tg.cancel_scope)
+        lifetime = self._lifetime = _HostLifetime(self, portal, exec_tg.cancel_scope)
         try:
             task_status.started(lifetime)
             services_supervisor = _ServicesSupervisor(self, lifetime)
