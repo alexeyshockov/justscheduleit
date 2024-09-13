@@ -7,7 +7,6 @@ from datetime import timedelta
 from justscheduleit import Scheduler, after, every, recurrent
 
 logging.basicConfig()
-
 logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 scheduler = Scheduler()

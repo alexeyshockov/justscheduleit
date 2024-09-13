@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import dataclasses as dc
 from os import getenv
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import uvicorn
 from anyio import TASK_STATUS_IGNORED, Event, create_task_group
 from anyio.abc import TaskStatus
-from uvicorn._types import ASGIApplication
 
 from justscheduleit._utils import observe_event
 from justscheduleit.hosting import ServiceLifetime
+
 
 # TODO Http endpoint
 
@@ -32,7 +32,7 @@ class UvicornService:
         self.config = config
 
     @classmethod
-    def for_app(cls, app: ASGIApplication | Callable[..., Any]):
+    def for_app(cls, app: Callable[..., Any]):
         return cls(
             uvicorn.Config(
                 app,
@@ -46,7 +46,7 @@ class UvicornService:
         async with create_task_group() as tg:
             # It is hard to use server.serve() directly, because it overrides the signal handlers. A workaround is to
             # call it in a separate thread, but currently it looks like an overkill.
-            server_lifetime = await tg.start(self._serve)
+            server_lifetime = cast(UvicornService._ServerLifetime, await tg.start(self._serve))
 
             async with create_task_group() as obs_tg:
                 # Service supervisor will cancel this (inner) task group on shutdown, not the whole task

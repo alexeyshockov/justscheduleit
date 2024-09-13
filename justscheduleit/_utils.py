@@ -76,7 +76,7 @@ def td_str(td: timedelta) -> str:
 DelayFactory = Union[Callable[[], timedelta], tuple[int, int], tuple[float, float], int, float, timedelta, None]
 
 
-@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
+@dc.dataclass(frozen=True, slots=True)
 class RandomDelay:  # https://en.wikipedia.org/wiki/Jitter#Types
     bounds: tuple[int, int] | tuple[float, float]
 
@@ -92,7 +92,7 @@ class RandomDelay:  # https://en.wikipedia.org/wiki/Jitter#Types
         return timedelta(seconds=delay)
 
 
-@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
+@dc.dataclass(frozen=True, slots=True)
 class FixedDelay:
     value: timedelta
 

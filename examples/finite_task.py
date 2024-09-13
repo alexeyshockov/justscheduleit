@@ -9,7 +9,6 @@ from justscheduleit import Scheduler, every
 from justscheduleit.cond import take_first
 
 logging.basicConfig()
-
 logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 scheduler = Scheduler()

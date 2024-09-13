@@ -9,7 +9,6 @@ from fast_depends import Depends, inject
 from justscheduleit import Scheduler, every
 
 logging.basicConfig()
-
 logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 scheduler = Scheduler()
@@ -30,4 +29,6 @@ def print_task(
 
 
 if __name__ == "__main__":
-    scheduler.run()
+    import justscheduleit
+
+    justscheduleit.run(scheduler)

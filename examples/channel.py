@@ -9,7 +9,6 @@ from justscheduleit.cond import take_first
 from justscheduleit.hosting import Host
 
 logging.basicConfig()
-
 logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 
@@ -41,4 +40,4 @@ async def scheduled_background_task():
 if __name__ == "__main__":
     from justscheduleit import hosting
 
-    hosting.run(host)
+    exit(hosting.run(host))

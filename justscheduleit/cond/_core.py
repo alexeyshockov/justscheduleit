@@ -88,7 +88,7 @@ def take_first(n: int, trigger: TriggerFactory[TriggerEventT, T]) -> TriggerFact
     return _take
 
 
-@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
+@dc.dataclass(frozen=True, slots=True)
 class Every:
     """
     Triggers every `period`, with an (optional) additional `delay` (jitter).
@@ -133,7 +133,7 @@ def every(period: timedelta | str, /, *, delay: DelayFactory = DEFAULT_JITTER, s
     return Every(ensure_td(period), ensure_delay_factory(delay), stop_on_error)
 
 
-@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
+@dc.dataclass(frozen=True, slots=True)
 class Recurrent:
     """
     Triggers every `default_period` (unless overwritten), with an (optional) additional `delay` (jitter).
@@ -188,7 +188,7 @@ def recurrent(
     return Recurrent(ensure_td(default_interval), ensure_delay_factory(delay), stop_on_error)
 
 
-@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
+@dc.dataclass(frozen=True, slots=True)
 class After(Generic[T]):
     """
     Triggers every time `task` is completed, with an (optional) additional `delay` (jitter).

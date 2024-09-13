@@ -14,7 +14,7 @@ from justscheduleit.scheduler import SchedulerLifetime
 __all__ = ["cron"]
 
 
-@dc.dataclass(frozen=True)  # Enable slots when Python 3.10+
+@dc.dataclass(frozen=True, slots=True)
 class Cron:
     """
     Triggers according to the cron schedule, with an (optional) additional `delay` (jitter).

@@ -6,7 +6,6 @@ from justscheduleit import Scheduler
 from justscheduleit.cond.cron import cron
 
 logging.basicConfig()
-
 logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 scheduler = Scheduler()

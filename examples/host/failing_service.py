@@ -8,7 +8,6 @@ import anyio
 from justscheduleit.hosting import Host, ServiceLifetime
 
 logging.basicConfig()
-
 logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 host = Host()
@@ -33,7 +32,7 @@ async def an_async_func():
     try:
         while True:
             print(f"{an_async_func.__name__} running")
-            await anyio.sleep(5)
+            await anyio.sleep(1)
             # raise RuntimeError("This is a test error from _async_")
     finally:
         print(f"{an_async_func.__name__} done")
@@ -42,4 +41,4 @@ async def an_async_func():
 if __name__ == "__main__":
     from justscheduleit import hosting
 
-    hosting.run(host)
+    exit(hosting.run(host))

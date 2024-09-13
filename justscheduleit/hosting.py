@@ -7,9 +7,9 @@ import signal
 import threading
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
-from enum import Enum
+from enum import Enum, auto
 from threading import Thread
-from typing import Any, Awaitable, Callable, Optional, Protocol, TypeVar, Union, cast, final
+from typing import Any, Awaitable, Callable, Optional, Protocol, TypeVar, Union, cast, final, TypedDict
 
 import anyio
 from anyio import (
@@ -43,20 +43,41 @@ logger = logging.getLogger(__name__)
 # Not something really useful, as you can always run a host as a Starlette/FastAPI lifespan.
 
 
-class HostState(Enum):
-    STARTING = "STARTED"
-    SHUTTING_DOWN = "SHUTTING_DOWN"
-    STOPPED = "STOPPED"
+class HostState(str, Enum):
+    STARTING = 'starting'
+    RUNNING = 'running'
+    # PARTIALLY_CRASHED = auto()
+    SHUTTING_DOWN = 'shutting_down'
+    STOPPED = 'stopped'
+    # CRASHED = auto()
 
 
-class HostLifetime(Protocol):
-    # exit_code: int = 0  # TODO Support later
+class ServiceState(str, Enum):
+    STARTING = 'starting'
+    RUNNING = 'running'
+    SHUTTING_DOWN = 'shutting_down'
+    STOPPED = 'stopped'
+    # CRASHED = auto()  # = STOPPED + exception
+
+
+# Just a dict, to have it JSON serializable
+class ServiceStatus(TypedDict):
+    state: ServiceState
+    exception: str | None
+
+
+# Just a dict, to have it JSON serializable
+class HostStatus(TypedDict):
+    state: HostState
+    services: Mapping[str, ServiceStatus]
+
+
+class HostLifetimeView(Protocol):
+    @property
+    def status(self) -> HostStatus: ...
 
     @property
-    def portal(self) -> BlockingPortal: ...
-
-    @property
-    def service_lifetimes(self) -> Mapping[str, ServiceLifetime]: ...
+    def services(self) -> Mapping[str, ServiceLifetime]: ...
 
     @property
     def started(self) -> EventView: ...
@@ -67,8 +88,12 @@ class HostLifetime(Protocol):
     @property
     def stopped(self) -> EventView: ...
 
+
+class HostLifetime(HostLifetimeView, Protocol):
+    exit_code: int = 0
+
     @property
-    def same_thread(self) -> bool: ...
+    def portal(self) -> BlockingPortal: ...
 
     def shutdown(self) -> None: ...
 
@@ -76,23 +101,34 @@ class HostLifetime(Protocol):
 
 
 class _HostLifetime:
-    __slots__ = ("thread_id", "_scope", "portal", "service_lifetimes", "started", "shutting_down", "stopped")
-
     def __init__(self, host: Host, portal: BlockingPortal, scope: CancelScope):
-        self.thread_id = threading.get_ident()
+        self._thread_id = threading.get_ident()
         self._scope = scope
-
         self.portal = portal
-
-        self.service_lifetimes = {name: _ServiceLifetime(service, self) for name, service in host.services.items()}
-
+        self.services = {name: _ServiceLifetime(service, self) for name, service in host.services.items()}
         self.started = Event()
         self.shutting_down = Event()
         self.stopped = Event()
+        self.exit_code = 0
+
+    @property
+    def status(self) -> HostStatus:
+        state = HostState.STARTING
+        if self.stopped.is_set():
+            state = HostState.STOPPED
+        elif self.shutting_down.is_set():
+            state = HostState.SHUTTING_DOWN
+        elif self.started.is_set():
+            state = HostState.RUNNING
+
+        return {
+            "state": state,
+            "services": {name: service.status for name, service in self.services.items()},
+        }
 
     @property
     def same_thread(self) -> bool:
-        return threading.get_ident() == self.thread_id
+        return threading.get_ident() == self._thread_id
 
     def shutdown(self) -> None:
         if self.stopped.is_set() or self.shutting_down.is_set():
@@ -110,15 +146,12 @@ class _HostLifetime:
             self.portal.start_task_soon(self._scope.cancel)  # noqa
 
 
-class ServiceLifetime(Protocol):
+class ServiceLifetimeView(Protocol):
     @property
     def name(self) -> str: ...
 
     @property
     def host_lifetime(self) -> HostLifetime: ...
-
-    @property
-    def host_portal(self) -> BlockingPortal: ...
 
     @property
     def started(self) -> EventView: ...
@@ -129,7 +162,15 @@ class ServiceLifetime(Protocol):
     @property
     def stopped(self) -> EventView: ...
 
-    graceful_shutdown_scope: CancelScope | None
+    @property
+    def exception(self) -> BaseException | None: ...
+
+
+class ServiceLifetime(ServiceLifetimeView, Protocol):
+    @property
+    def host_portal(self) -> BlockingPortal: ...
+
+    graceful_shutdown_scope: CancelScope | None = None
     """
     A scope for a graceful shutdown of the service.
 
@@ -141,14 +182,31 @@ class ServiceLifetime(Protocol):
     def shutdown(self) -> None: ...
 
 
-@dc.dataclass(slots=True)
 class _ServiceLifetime:
-    service: ServiceDescriptor
-    host_lifetime: _HostLifetime
-    started: Event = dc.field(default_factory=Event)
-    shutting_down: Event = dc.field(default_factory=Event)
-    stopped: Event = dc.field(default_factory=Event)
-    graceful_shutdown_scope: CancelScope | None = None
+    def __init__(self, service: ServiceDescriptor, host_lifetime: _HostLifetime):
+        self.service = service
+        self.host_lifetime = host_lifetime
+        self.started = Event()
+        self.shutting_down = Event()
+        self.stopped = Event()
+        self.graceful_shutdown_scope: CancelScope | None = None
+        self.exception: BaseException | None = None
+
+    @property
+    def status(self) -> ServiceStatus:
+        state = ServiceState.STARTING
+        if self.stopped.is_set():
+            state = ServiceState.STOPPED
+        elif self.shutting_down.is_set():
+            state = ServiceState.SHUTTING_DOWN
+        elif self.started.is_set():
+            state = ServiceState.RUNNING
+
+        return {
+            "state": state,
+            # "exception": traceback.format_exception(self.exception) if self.exception else None,
+            "exception": str(self.exception) if self.exception else None,
+        }
 
     @property
     def name(self):
@@ -309,21 +367,43 @@ def _create_service(target: HostedService) -> Service:
         return SyncService(target).execute
 
 
+class ServiceMode(Enum):
+    NORMAL = auto()
+    MAIN = auto()
+    """
+    When a main service stops, the host stops. If the service stops with an exception, the host stops with a non-zero 
+    exit code.
+    """
+    DAEMON = auto()
+    """
+    Daemon services don't prevent the host from stopping (when all other services are done).
+    """
+
+    @classmethod
+    def create(cls, main: bool, daemon: bool) -> ServiceMode:
+        if main and daemon:
+            raise ValueError("Service can't be both main and daemon")
+        if main:
+            return cls.MAIN
+        if daemon:
+            return cls.DAEMON
+        return cls.NORMAL
+
+
 @final
 @dc.dataclass(frozen=True, slots=True)
 class ServiceDescriptor:
     func: Service
     name: str
-
-    daemon: bool = False
-
+    mode: ServiceMode = ServiceMode.NORMAL
     # start_timeout: float | None = None
-    # Maybe implement later
+
+    @property
+    def is_daemon(self) -> bool:
+        return self.mode is ServiceMode.DAEMON
 
 
 class _ServiceSupervisor:
-    __slots__ = ("lifetime",)
-
     def __init__(self, lifetime: _ServiceLifetime):
         self.lifetime = lifetime
 
@@ -331,17 +411,14 @@ class _ServiceSupervisor:
         self.lifetime.shutdown()
 
     async def execute(self):
-        name = self.lifetime.service.name
+        service = self.lifetime.service
         service_lifetime = self.lifetime
+        host_lifetime = service_lifetime.host_lifetime
         service_func = self.lifetime.service.func
-
-        def service_stopped():
-            service_lifetime.stopped.set()
-            logger.debug(f"{name} stopped")
 
         async def observe_service_started():
             await service_lifetime.started.wait()
-            logger.debug(f"{name} started")
+            logger.debug(f"{service.name} started")
 
         async def observe_service_shutdown(scope: CancelScope):
             await service_lifetime.shutting_down.wait()
@@ -355,23 +432,24 @@ class _ServiceSupervisor:
             service_tg.start_soon(observe_service_started)
             service_tg.start_soon(observe_service_shutdown, service_tg.cancel_scope)
             try:
-                logger.debug(f"Starting {name}...")
+                logger.debug(f"Starting {service.name}...")
                 await service_func(service_lifetime)
+                service_tg.cancel_scope.cancel()  # Shutdown all the observers when the service completes
             except get_cancelled_exc_class():  # noqa
                 raise  # Propagate the cancellation
-            except Exception:  # noqa
-                logger.exception(f"{name} crashed")
+            except Exception as exc:  # noqa
+                service_lifetime.exception = exc
+                logger.exception(f"{service.name} crashed")
             finally:
-                service_stopped()
-                service_tg.cancel_scope.cancel()  # Shutdown all the observers
+                service_lifetime.stopped.set()
+                logger.debug(f"{service.name} stopped")
+                if service.mode is ServiceMode.MAIN:
+                    if service_lifetime.exception:
+                        host_lifetime.exit_code = 1
+                    host_lifetime.shutdown()
 
 
 class _ServicesSupervisor:
-    services: list[_ServiceSupervisor]
-    host_lifetime: _HostLifetime
-
-    __slots__ = ("services", "host_lifetime")
-
     def __init__(self, host: Host, host_lifetime: _HostLifetime):
         self.host_lifetime = host_lifetime
         self.services = [
@@ -382,7 +460,7 @@ class _ServicesSupervisor:
         host_lifetime = self.host_lifetime
         services = self.services
         services_cnt = len(services)
-        foreground_services_cnt = sum(not service.lifetime.service.daemon for service in services)
+        foreground_services_cnt = sum(not service.lifetime.service.is_daemon for service in services)
         services_started = 0
         all_services_started = Event()
         foreground_services_stopped = 0  # Non-daemon services
@@ -401,7 +479,7 @@ class _ServicesSupervisor:
         async def observe_service_stopped(service_lifetime: _ServiceLifetime):
             nonlocal services_stopped, foreground_services_stopped
             await service_lifetime.stopped.wait()
-            if not service_lifetime.service.daemon:
+            if not service_lifetime.service.is_daemon:
                 foreground_services_stopped += 1
             services_stopped += 1
             if foreground_services_stopped == foreground_services_cnt:
@@ -478,28 +556,29 @@ class Host:
         self._services[service.name] = service
         return service
 
-    def add_service(self, func: Service, /, *, name: str | None = None, daemon: bool = False) -> ServiceDescriptor:
+    def add_service(self, func: Service, /, *, name: str | None = None, main=False, daemon=False) -> ServiceDescriptor:
         """
         Register a service in the host.
 
         :param func: A service function.
         :param name: An (optional) uniq name for the service. If not provided, will be generated from the function name.
-        :param daemon: If True, the service won't prevent the host from stopping when all non-daemon services are done.
+        :param main: If True, the service will be considered as a main one. The host will stop when this service stops.
+        :param daemon: If True, the service won't prevent the host from stopping (when all other services are done).
         :return: The service descriptor.
         """
-        return self._add_service(ServiceDescriptor(func, name if name else task_full_name(func), daemon))
+        return self._add_service(ServiceDescriptor(
+            func, name if name else task_full_name(func), ServiceMode.create(main, daemon)))
 
     def service(
-        self, name: str | None = None, /, *, daemon: bool = False
+        self, name: str | None = None, /, *, main=False, daemon=False
     ) -> Callable[[Callable[P, T]], Callable[P, T]]:
         """
         Decorator to register an (async) function as a hosted service.
         """
 
         def decorator(func: Callable[P, T]) -> Callable[P, T]:
-            self._add_service(
-                ServiceDescriptor(_create_service(func), name=name if name else task_full_name(func), daemon=daemon)
-            )
+            self._add_service(ServiceDescriptor(
+                _create_service(func), name if name else task_full_name(func), ServiceMode.create(main, daemon)))
             return func
 
         return decorator
@@ -587,23 +666,29 @@ class Host:
             self._lifetime = None
 
 
-async def arun(host: Host):
+async def arun(host: Host) -> int:
     if threading.current_thread() is not threading.main_thread():
         raise RuntimeError("Signals can only be installed on the main thread")
 
+    exit_code = 0
     async with create_task_group() as tg:
         host_lifetime: HostLifetime = await tg.start(host.aexecute)
-        observe_event(tg, host_lifetime.stopped, lambda: tg.cancel_scope.cancel())
-        with open_signal_receiver(*HANDLED_SIGNALS) as signals:
-            async for sig in signals:
-                if not host_lifetime.shutting_down.is_set():  # First Ctrl+C (or other termination signal)
-                    logger.info("Shutting down...")
-                    host_lifetime.shutdown()
-                    continue
-                if sig == signal.SIGINT:  # Ctrl+C again
-                    logger.warning("Forced shutdown")
-                    host_lifetime.stop()
+        try:
+            observe_event(tg, host_lifetime.stopped, lambda: tg.cancel_scope.cancel())
+            with open_signal_receiver(*HANDLED_SIGNALS) as signals:
+                async for sig in signals:
+                    if not host_lifetime.shutting_down.is_set():  # First Ctrl+C (or other termination signal)
+                        logger.info("Shutting down...")
+                        host_lifetime.shutdown()
+                        continue
+                    if sig == signal.SIGINT:  # Ctrl+C again
+                        logger.warning("Forced shutdown")
+                        host_lifetime.stop()
+        finally:
+            exit_code = host_lifetime.exit_code
+
+    return exit_code
 
 
-def run(host: Host):
-    anyio.run(arun, host, **choose_anyio_backend())
+def run(host: Host) -> int:
+    return anyio.run(arun, host, **choose_anyio_backend())

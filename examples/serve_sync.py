@@ -17,7 +17,6 @@ def main():
         except KeyboardInterrupt:
             # Scheduler service is the only one in the host, so after the scheduler is done, the host will stop too
             scheduler_host.shutdown()
-            # scheduler.lifetime.shutdown()
 
     print("Main thread is done, exiting the app")
 

@@ -6,7 +6,6 @@ import time
 from justscheduleit.hosting import Host, ServiceLifetime
 
 logging.basicConfig()
-
 logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 host = Host()
@@ -25,4 +24,4 @@ def a_sync_service(service_lifetime: ServiceLifetime):
 if __name__ == "__main__":
     from justscheduleit import hosting
 
-    hosting.run(host)
+    exit(hosting.run(host))

@@ -3,11 +3,9 @@
 import logging
 from datetime import timedelta
 
-import justscheduleit
 from justscheduleit import Scheduler, every
 
 logging.basicConfig()
-
 logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 scheduler = Scheduler()
@@ -26,4 +24,6 @@ def a_sync_task():
 
 
 if __name__ == "__main__":
+    import justscheduleit
+
     justscheduleit.run(scheduler)

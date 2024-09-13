@@ -10,7 +10,6 @@ from anyio.abc import TaskStatus
 from justscheduleit.hosting import Host, ServiceLifetime
 
 logging.basicConfig()
-
 logging.getLogger("justscheduleit").setLevel(logging.DEBUG)
 
 host = Host()
@@ -89,4 +88,4 @@ async def an_async_service_tpl(n: int):
 if __name__ == "__main__":
     from justscheduleit import hosting
 
-    hosting.run(host)
+    exit(hosting.run(host))

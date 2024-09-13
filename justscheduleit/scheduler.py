@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses as dc
 import inspect
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Collection
 from contextlib import asynccontextmanager, contextmanager
 from functools import partial
 from typing import (
@@ -16,7 +16,7 @@ from typing import (
     TypeVar,
     Union,
     cast,
-    final,
+    final, overload,
 )
 
 import anyio
@@ -29,9 +29,9 @@ from anyio import (
 )
 from anyio.from_thread import BlockingPortal
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from typing_extensions import ParamSpec, Self, overload
+from typing_extensions import ParamSpec, Self
 
-from justscheduleit._utils import NULL_CM, EventView, choose_anyio_backend, observe_event, task_full_name
+from justscheduleit._utils import NULL_CM, choose_anyio_backend, observe_event, task_full_name, EventView
 from justscheduleit.hosting import Host, HostLifetime, ServiceLifetime
 
 # Optional dependencies
@@ -68,12 +68,11 @@ class TaskExecutionFlow(Protocol[T, TriggerEventT]):
     def subscribe(self) -> MemoryObjectReceiveStream[T]: ...
 
 
+@dc.dataclass(slots=True)
 class _TaskExecutionFlow(Generic[T, TriggerEventT]):
     task: ScheduledTask[T, TriggerEventT]
     results: MemoryObjectSendStream[T]
     _results_reader: MemoryObjectReceiveStream[T]
-
-    __slots__ = ("task", "results", "_results_reader")
 
     def __init__(self, task: ScheduledTask[T, Any]):
         self.task = task
@@ -107,8 +106,6 @@ class _TaskExecution(Generic[T, TriggerEventT]):
     """
 
     _tracer: Tracer | None
-
-    __slots__ = ("task", "exec_flow", "trigger", "_async_target", "_scope", "_tracer")
 
     def __init__(self, exec_flow: _TaskExecutionFlow[T, TriggerEventT], scheduler_lifetime: SchedulerLifetime):
         task = exec_flow.task
@@ -175,11 +172,12 @@ class _TaskExecution(Generic[T, TriggerEventT]):
 
 
 @final
-@dc.dataclass(frozen=True)
+@dc.dataclass(frozen=True, slots=True)
 class ScheduledTask(Generic[T, TriggerEventT]):
     name: str
     target: TaskT[T]
     trigger: TriggerFactory[TriggerEventT, T]
+    _: dc.KW_ONLY
     event_aware: bool = False
     """
     Whether the target function accepts an event parameter.
@@ -192,26 +190,21 @@ class ScheduledTask(Generic[T, TriggerEventT]):
         return f"{self.__class__.__name__}({self.name!r}, {self.trigger!r})"
 
     @classmethod
-    def create(cls, target: TaskT[T], trigger: TriggerFactory, *, name: str | None = None) -> Self:
-        return cls(name or task_full_name(target), target, trigger, len(inspect.signature(target).parameters) > 0)
+    def create(cls, target: TaskT[T], trigger: TriggerFactory, /, *, name: str | None = None) -> Self:
+        return cls(name or task_full_name(target), target, trigger,
+                   event_aware=len(inspect.signature(target).parameters) > 0)
 
 
-@final
 class SchedulerLifetime:
     """
-    Scheduler execution manager, for _outside_ control of the scheduler.
+    Execution manager, for _outside_ control of the scheduler.
     """
 
-    scheduler: Scheduler
-    tasks: Mapping[ScheduledTask, TaskExecutionFlow]
-
-    _service_lifetime: ServiceLifetime
-
-    __slots__ = ("scheduler", "tasks", "_service_lifetime")
-
-    def __init__(self, scheduler, exec_flows, service_lifetime):
+    def __init__(self,
+                 scheduler: Scheduler, exec_flows: Collection[TaskExecutionFlow],
+                 service_lifetime: ServiceLifetime):
         self.scheduler = scheduler
-        self.tasks = {exec_flow.task: exec_flow for exec_flow in exec_flows}
+        self._tasks = {exec_flow.task: exec_flow for exec_flow in exec_flows}
         self._service_lifetime = service_lifetime
 
     def __repr__(self):
@@ -231,25 +224,27 @@ class SchedulerLifetime:
 
     @property
     def host_portal(self) -> BlockingPortal:
-        return self._service_lifetime.host_lifetime.portal
+        return self._service_lifetime.host_portal
 
     @overload
-    def find_exec_for(self, task: TaskT[T]) -> TaskExecutionFlow[T, Any] | None: ...
+    def find_exec_for(self, task: TaskT[T]) -> TaskExecutionFlow[T, Any] | None:
+        ...
 
     @overload
-    def find_exec_for(self, task: ScheduledTask[T, TriggerEventT]) -> TaskExecutionFlow[T, TriggerEventT] | None: ...
+    def find_exec_for(self, task: ScheduledTask[T, TriggerEventT]) -> TaskExecutionFlow[T, TriggerEventT] | None:
+        ...
 
     def find_exec_for(self, task: TaskT[T] | ScheduledTask[T, Any]) -> TaskExecutionFlow[T, Any] | None:
         if isinstance(task, ScheduledTask):
-            return self.tasks.get(task)
+            return self._tasks.get(task)
 
-        for task_exec in self.tasks.values():
+        for task_exec in self._tasks.values():
             if task_exec.task.target == task:
                 return task_exec
 
         return None
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self._service_lifetime.shutdown()
 
 
