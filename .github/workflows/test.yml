@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - uses: extractions/setup-just@v1
+      - uses: extractions/setup-just@v2
       - name: Install dependencies
         run: |
           just upgrade-pip
