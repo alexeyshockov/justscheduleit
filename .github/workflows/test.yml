@@ -1,0 +1,29 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [ master, main, feat/* ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["pypy3.9", "pypy3.10", "3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - uses: extractions/setup-just@v1
+      - name: Install dependencies
+        run: |
+          just upgrade-pip
+          python3 -m pip install -r requirements.txt --disable-pip-version-check
+#      - uses: sonarsource/sonarcloud-github-action@master
+#        env:
+#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
