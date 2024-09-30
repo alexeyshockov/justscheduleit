@@ -295,7 +295,7 @@ class SyncService:
                 self.exc = exc
             finally:
                 try:
-                    host_portal.start_task_soon(self.completed.set)  # type: ignore
+                    host_portal.start_task_soon(self.completed.set).result()
                 except RuntimeError:
                     logger.warning("A sync service has completed, but the portal is already closed")
 
@@ -307,7 +307,7 @@ class SyncService:
 
     __slots__ = ("func", "lifetime_aware")
 
-    def __init__(self, func: Callable[..., Awaitable[Any]]):
+    def __init__(self, func: Callable[..., Any]):
         self.func = func
         # Try to detect if the function's additional capabilities, can be overridden by the user
         func_signature = inspect.signature(func)
@@ -450,15 +450,14 @@ class _ServiceSupervisor:
 
 
 class _ServicesSupervisor:
-    def __init__(self, host: Host, host_lifetime: _HostLifetime):
+    def __init__(self, host_lifetime: _HostLifetime):
         self.host_lifetime = host_lifetime
-        self.services = [
-            _ServiceSupervisor(_ServiceLifetime(service, host_lifetime)) for service in host.services.values()
-        ]
 
     async def execute(self):  # noqa: C901 (ignore complexity)
         host_lifetime = self.host_lifetime
-        services = self.services
+        services = [
+            _ServiceSupervisor(service_lifetime) for service_lifetime in host_lifetime.services.values()
+        ]
         services_cnt = len(services)
         foreground_services_cnt = sum(not service.lifetime.service.is_daemon for service in services)
         services_started = 0
@@ -658,7 +657,7 @@ class Host:
         lifetime = self._lifetime = _HostLifetime(self, portal, exec_tg.cancel_scope)
         try:
             task_status.started(lifetime)
-            services_supervisor = _ServicesSupervisor(self, lifetime)
+            services_supervisor = _ServicesSupervisor(lifetime)
             await services_supervisor.execute()
         finally:
             lifetime.stopped.set()

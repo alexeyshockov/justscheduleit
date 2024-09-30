@@ -35,14 +35,14 @@ sync-deps: upgrade-pip
 check-style:
     ruff check justscheduleit examples
 check-types:
-    pyright --pythonpath $(which python) justscheduleit examples
+    pyright --pythonpath $(which python) justscheduleit examples tests
 check: check-style check-types
 
 
 
 alias fix-style := format
 format:
-    ruff check --fix justscheduleit examples
+    ruff check --fix justscheduleit examples tests
     ruff format justscheduleit examples
 
 

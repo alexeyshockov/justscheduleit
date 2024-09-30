@@ -1,35 +1,64 @@
 # JustScheduleIt
 
+[![PyPI package](https://img.shields.io/pypi/v/JustScheduleIt?label=JustScheduleIt)](https://pypi.org/project/JustScheduleIt/)
+[![Supported Python versions](https://img.shields.io/pypi/pyversions/JustScheduleIt)](https://pypi.org/project/JustScheduleIt/)
+
 Simple in-process task scheduler for Python apps.
 
 Use it if:
-- you need to schedule a background tasks in the same process, like to update a shared (Pandas) dataframe every hour from S3
+
+- you need to schedule background tasks in the same process, like to update a shared dataframe every hour
+  from S3
 
 Take something else if:
-- you need to schedule persistent / distributed tasks (take a look at Celery)
+
+- you need to schedule persistent/distributed tasks, that should be executed in a separate process (take a look at
+  Celery)
 
 ## Installation
 
 ```shell
-$ pip3 install justscheduleit
+$ pip install justscheduleit
 ```
 
 ## Usage
 
 ### Just schedule a task
 
-### Sync and async functions
+```python
+from datetime import timedelta
+
+from justscheduleit import Scheduler, every, run
+
+scheduler = Scheduler()
+
+
+@scheduler.task(every(timedelta(minutes=1), delay=(0, 10)))
+def task():
+    print("Hello, world!")
+
+
+run(scheduler)
+```
+
+### `sync` and `async` tasks
+
+The scheduler supports both `sync` and `async` functions. A `sync` function will be executed in a separate thread,
+using [
+`anyio.to_thread.run_sync()`](https://anyio.readthedocs.io/en/stable/threads.html#running-a-function-in-a-worker-thread),
+so it won't block the scheduler (other tasks).
 
 ### (Advanced) Hosting
 
-Scheduler is built around Host abstraction. A host is a supervisor that runs 1 or more services, usually as the 
+Scheduler is built around Host abstraction. A host is a supervisor that runs 1 or more services, usually as the
 application entry point.
 
-A scheduler itself is a hosted service. To run it, you need a host.
+A scheduler itself is a hosted service. The default `justscheduleit.run()` internally just creates a host with one
+service, the passed scheduler, and runs it.
 
 ## Alternatives
 
-There are a lot of alternatives, but most of them are either too complex (like Rocketry), does not support async (like 
+There are a lot of alternatives, but most of them are either too complex (like Rocketry), does not support async (like
 schedule), or just abandoned.
 
 - https://pypi.org/project/simple-scheduler/
@@ -54,9 +83,9 @@ And some (probably) abandoned ones:
 ### Naming convention
 
 - Classes for async-only use cases
-  - `async def serve()` returns an async context manager
-  - `async def execute()` "blocks" the execution flow (until everything is done)
+    - `async def serve()` returns an async context manager
+    - `async def execute()` "blocks" the execution flow (until everything is done)
 - Classes for both sync- and async- use cases
-  - `def serve()` returns a context manager
-  - `async def aserve()` returns an async context manager
-  - `async def aexecute()` "blocks" the execution flow (until everything is done)
+    - `def serve()` returns a context manager
+    - `async def aserve()` returns an async context manager
+    - `async def aexecute()` "blocks" the execution flow (until everything is done)

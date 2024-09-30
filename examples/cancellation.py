@@ -18,12 +18,15 @@ scheduler = Scheduler()
 async def long_async_task():
     print(f"{long_async_task.__name__} is triggered!")
     try:
+        # On a normal shutdown (Ctrl+C), the scheduler will just wait for the current task execution to finish
         await anyio.sleep(15)
     except CancelledError:
-        # Won't be cancelled in the normal flow (graceful shutdown)
+        # Only in case of forced shutdown (second Ctrl+C, or SchedulerLifetime.stop())
         print(f"Forced shutdown!")
         raise
-    print(f"{long_async_task.__name__} has finished!")
+    finally:
+        # Will be executed always
+        print(f"{long_async_task.__name__} has finished!")
 
 
 if __name__ == "__main__":
