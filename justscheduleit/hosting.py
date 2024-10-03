@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
 from enum import Enum, auto
 from threading import Thread
-from typing import Any, Awaitable, Callable, Optional, Protocol, TypeVar, Union, cast, final, TypedDict
+from typing import Any, Awaitable, Callable, Optional, Protocol, TypedDict, TypeVar, Union, cast, final
 
 import anyio
 from anyio import (
@@ -44,19 +44,19 @@ logger = logging.getLogger(__name__)
 
 
 class HostState(str, Enum):
-    STARTING = 'starting'
-    RUNNING = 'running'
+    STARTING = "starting"
+    RUNNING = "running"
     # PARTIALLY_CRASHED = auto()
-    SHUTTING_DOWN = 'shutting_down'
-    STOPPED = 'stopped'
+    SHUTTING_DOWN = "shutting_down"
+    STOPPED = "stopped"
     # CRASHED = auto()
 
 
 class ServiceState(str, Enum):
-    STARTING = 'starting'
-    RUNNING = 'running'
-    SHUTTING_DOWN = 'shutting_down'
-    STOPPED = 'stopped'
+    STARTING = "starting"
+    RUNNING = "running"
+    SHUTTING_DOWN = "shutting_down"
+    STOPPED = "stopped"
     # CRASHED = auto()  # = STOPPED + exception
 
 
@@ -371,7 +371,7 @@ class ServiceMode(Enum):
     NORMAL = auto()
     MAIN = auto()
     """
-    When a main service stops, the host stops. If the service stops with an exception, the host stops with a non-zero 
+    When a main service stops, the host stops. If the service stops with an exception, the host stops with a non-zero
     exit code.
     """
     DAEMON = auto()
@@ -455,9 +455,7 @@ class _ServicesSupervisor:
 
     async def execute(self):  # noqa: C901 (ignore complexity)
         host_lifetime = self.host_lifetime
-        services = [
-            _ServiceSupervisor(service_lifetime) for service_lifetime in host_lifetime.services.values()
-        ]
+        services = [_ServiceSupervisor(service_lifetime) for service_lifetime in host_lifetime.services.values()]
         services_cnt = len(services)
         foreground_services_cnt = sum(not service.lifetime.service.is_daemon for service in services)
         services_started = 0
@@ -565,8 +563,9 @@ class Host:
         :param daemon: If True, the service won't prevent the host from stopping (when all other services are done).
         :return: The service descriptor.
         """
-        return self._add_service(ServiceDescriptor(
-            func, name if name else task_full_name(func), ServiceMode.create(main, daemon)))
+        return self._add_service(
+            ServiceDescriptor(func, name if name else task_full_name(func), ServiceMode.create(main, daemon))
+        )
 
     def service(
         self, name: str | None = None, /, *, main=False, daemon=False
@@ -576,8 +575,11 @@ class Host:
         """
 
         def decorator(func: Callable[P, T]) -> Callable[P, T]:
-            self._add_service(ServiceDescriptor(
-                _create_service(func), name if name else task_full_name(func), ServiceMode.create(main, daemon)))
+            self._add_service(
+                ServiceDescriptor(
+                    _create_service(func), name if name else task_full_name(func), ServiceMode.create(main, daemon)
+                )
+            )
             return func
 
         return decorator

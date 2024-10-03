@@ -22,7 +22,7 @@ async def long_async_task():
         await anyio.sleep(15)
     except CancelledError:
         # Only in case of forced shutdown (second Ctrl+C, or SchedulerLifetime.stop())
-        print(f"Forced shutdown!")
+        print("Forced shutdown!")
         raise
     finally:
         # Will be executed always

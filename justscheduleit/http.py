@@ -31,12 +31,14 @@ class UvicornService:
 
     @classmethod
     def for_app(cls, app: Callable[..., Any]):
-        return cls(uvicorn.Config(
-            app,
-            host=getenv("UVICORN_HOST", "127.0.0.1"),
-            port=int(getenv("UVICORN_PORT", "8000")),
-            log_config=None,  # Do not override the logging configuration
-        ))
+        return cls(
+            uvicorn.Config(
+                app,
+                host=getenv("UVICORN_HOST", "127.0.0.1"),
+                port=int(getenv("UVICORN_PORT", "8000")),
+                log_config=None,  # Do not override the logging configuration
+            )
+        )
 
     async def __call__(self, service_lifetime: ServiceLifetime):
         async with create_task_group() as tg:

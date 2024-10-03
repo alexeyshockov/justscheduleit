@@ -5,7 +5,7 @@ from anyio import fail_after
 from anyio.from_thread import BlockingPortal
 from pytest_mock import MockerFixture
 
-from justscheduleit.hosting import SyncService, ServiceLifetime
+from justscheduleit.hosting import ServiceLifetime, SyncService
 
 pytestmark = pytest.mark.anyio
 
@@ -21,19 +21,19 @@ async def test_sync_service_param_detection():
         pass
 
     s = SyncService(simple_sync_service)
-    assert s.lifetime_aware == False
+    assert not s.lifetime_aware
 
     def sync_service1(lifetime: ServiceLifetime):
         pass
 
     s = SyncService(sync_service1)
-    assert s.lifetime_aware == False
+    assert not s.lifetime_aware
 
     def sync_service2(service_lifetime: ServiceLifetime):
         pass
 
     s = SyncService(sync_service2)
-    assert s.lifetime_aware == True
+    assert s.lifetime_aware
 
 
 async def test_sync_service(portal, mocker: MockerFixture):

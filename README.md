@@ -18,7 +18,7 @@ Take something else if:
 ## Installation
 
 ```shell
-$ pip install justscheduleit
+pip install justscheduleit
 ```
 
 ## Usage
@@ -48,7 +48,29 @@ using [
 `anyio.to_thread.run_sync()`](https://anyio.readthedocs.io/en/stable/threads.html#running-a-function-in-a-worker-thread),
 so it won't block the scheduler (other tasks).
 
-### (Advanced) Hosting
+### Error handling
+
+TODO
+
+## Triggers
+
+### Flow control (`stop_on_error`)
+
+TODO
+
+### `every`, `recurrent`
+
+TODO
+
+### `cron`
+
+TODO
+
+### `steam.for_each`, `stream.for_batch`
+
+TODO
+
+## (Advanced) Hosting
 
 Scheduler is built around Host abstraction. A host is a supervisor that runs 1 or more services, usually as the
 application entry point.

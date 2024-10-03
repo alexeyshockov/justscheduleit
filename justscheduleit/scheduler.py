@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses as dc
 import inspect
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Collection
+from collections.abc import AsyncGenerator, AsyncIterator, Collection, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from functools import partial
 from typing import (
@@ -16,7 +16,8 @@ from typing import (
     TypeVar,
     Union,
     cast,
-    final, overload,
+    final,
+    overload,
 )
 
 import anyio
@@ -31,7 +32,7 @@ from anyio.from_thread import BlockingPortal
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from typing_extensions import ParamSpec, Self
 
-from justscheduleit._utils import NULL_CM, choose_anyio_backend, observe_event, task_full_name, EventView
+from justscheduleit._utils import NULL_CM, EventView, choose_anyio_backend, observe_event, task_full_name
 from justscheduleit.hosting import Host, HostLifetime, ServiceLifetime
 
 # Optional dependencies
@@ -142,7 +143,7 @@ class _TaskExecution(Generic[T, TriggerEventT]):
                 while True:
                     with shutdown_scope:
                         event = await move_next
-                    if shutdown_scope.cancel_called:
+                    if shutdown_scope.cancelled_caught:
                         break
                     try:
                         result = await self._execute_task(event)
@@ -191,8 +192,9 @@ class ScheduledTask(Generic[T, TriggerEventT]):
 
     @classmethod
     def create(cls, target: TaskT[T], trigger: TriggerFactory, /, *, name: str | None = None) -> Self:
-        return cls(name or task_full_name(target), target, trigger,
-                   event_aware=len(inspect.signature(target).parameters) > 0)
+        return cls(
+            name or task_full_name(target), target, trigger, event_aware=len(inspect.signature(target).parameters) > 0
+        )
 
 
 class SchedulerLifetime:
@@ -200,9 +202,9 @@ class SchedulerLifetime:
     Execution manager, for _outside_ control of the scheduler.
     """
 
-    def __init__(self,
-                 scheduler: Scheduler, exec_flows: Collection[TaskExecutionFlow],
-                 service_lifetime: ServiceLifetime):
+    def __init__(
+        self, scheduler: Scheduler, exec_flows: Collection[TaskExecutionFlow], service_lifetime: ServiceLifetime
+    ):
         self.scheduler = scheduler
         self._tasks = {exec_flow.task: exec_flow for exec_flow in exec_flows}
         self._service_lifetime = service_lifetime
@@ -227,12 +229,10 @@ class SchedulerLifetime:
         return self._service_lifetime.host_portal
 
     @overload
-    def find_exec_for(self, task: TaskT[T]) -> TaskExecutionFlow[T, Any] | None:
-        ...
+    def find_exec_for(self, task: TaskT[T]) -> TaskExecutionFlow[T, Any] | None: ...
 
     @overload
-    def find_exec_for(self, task: ScheduledTask[T, TriggerEventT]) -> TaskExecutionFlow[T, TriggerEventT] | None:
-        ...
+    def find_exec_for(self, task: ScheduledTask[T, TriggerEventT]) -> TaskExecutionFlow[T, TriggerEventT] | None: ...
 
     def find_exec_for(self, task: TaskT[T] | ScheduledTask[T, Any]) -> TaskExecutionFlow[T, Any] | None:
         if isinstance(task, ScheduledTask):
