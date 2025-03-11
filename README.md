@@ -1,4 +1,4 @@
-# JustScheduleIt
+# ~~JustScheduleIt~~ → [localpost.py](https://github.com/alexeyshockov/localpost.py)
 
 [![PyPI package](https://img.shields.io/pypi/v/JustScheduleIt?label=JustScheduleIt)](https://pypi.org/project/JustScheduleIt/)
 [![Supported Python versions](https://img.shields.io/pypi/pyversions/JustScheduleIt)](https://pypi.org/project/JustScheduleIt/)
